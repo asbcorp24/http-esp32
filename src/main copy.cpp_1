@@ -1,0 +1,200 @@
+#include <Arduino.h>
+#include <Wire.h>
+#include "EmonLib.h"
+#include "RTClib.h"
+#include <OneWire.h>
+#include <DallasTemperature.h>
+#include <TinyGsmClient.h>
+#include <ArduinoHttpClient.h>
+#include <StreamDebugger.h>
+// ===== GSM (UART2) =====
+// ===== Serial =====
+#define SerialMon Serial
+#define SerialAT  Serial1
+// ===== APN (Tele2 IoT) =====
+const char apn[] = "internet.tele2.ru";
+const char user[] = "";
+const char pass[] = "";
+// ===== HTTP server =====
+//const char server[] = "http://specdpo.ru";
+const int  port = 33775;
+//const char resource[] = "/bek/?curr=2.7&power=560";
+const char server[] = "78.138.169.178";
+ char resource[128];
+// ===== TinyGSM =====
+//
+//StreamDebugger debugger(SerialAT, SerialMon);
+//TinyGsm modem(debugger);
+TinyGsm modem(SerialAT);
+TinyGsmClient client(modem);
+HttpClient http(client, server, port);
+
+// ===== Датчики =====
+EnergyMonitor energyMonitor;
+RTC_DS3231 rtc;
+
+const float Voltage = 220.0;
+const float irmsOffset = 1.0;
+const float currentThreshold = 0.10;
+
+#define HEATER_PIN 25      // GPIO управления MOSFET
+#define TEMP_ON   -5.0     // включение обогрева
+#define TEMP_OFF   0.0     // выключение обогрева
+bool heaterState = false;
+// ===== DS18B20 =====
+#define ONE_WIRE_BUS 4
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature ds18b20(&oneWire);
+
+// ===== Интервалы =====
+unsigned long lastSend = 0;
+const unsigned long SEND_INTERVAL = 30000; // 30 сек
+
+double rawI;
+double Current;
+double Power;
+
+void GSM_loop();
+void Current_sensor();
+// ===================== SETUP/LOOP =====================
+
+void setup() {
+    SerialMon.begin(115200);
+  delay(1000);
+
+  // UART к SIM900
+  SerialAT.begin(9600, SERIAL_8N1, 16, 17);
+  SerialMon.println("SerialAT started @9600");
+
+  delay(1000);
+
+  SerialMon.println("Restart modem");
+  modem.restart();
+
+  SerialMon.print("Modem: ");
+  SerialMon.println(modem.getModemInfo());
+
+  SerialMon.print("Waiting for network...");
+  if (!modem.waitForNetwork(60000)) {
+    SerialMon.println(" FAIL");
+    return;
+  }
+  SerialMon.println(" OK");
+
+  SerialMon.print("Connecting GPRS...");
+  if (!modem.gprsConnect(apn, user, pass)) {
+    SerialMon.println(" FAIL");
+    return;
+  }
+  SerialMon.println(" OK");
+
+  ////////////////////////////////////////////
+  Serial.begin(115200);
+  delay(1000);
+pinMode(HEATER_PIN, OUTPUT);
+digitalWrite(HEATER_PIN, LOW); // обогрев выключен при старте
+  // RTC
+  Wire.begin();
+  if (!rtc.begin()) {
+    Serial.println("RTC DS3231 не найден!");
+  } else {
+    Serial.println("RTC DS3231 найден.");
+    if (rtc.lostPower()) {
+      Serial.println("RTC потерял питание, ставлю время компиляции...");
+      rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+    }
+  }
+
+  // Ток
+  energyMonitor.current(35, 82);
+  // ===== DS18B20 =====
+  ds18b20.begin();
+  Serial.println("DS18B20 initialized");
+}
+
+
+void GSM_loop(){
+    snprintf(
+    resource,
+    sizeof(resource),
+    "/sim900?Current=%.3f&Power=%.1f",
+    Current,
+    Power
+  );
+  SerialMon.println("HTTP GET...");
+  
+  int err = http.get(resource);
+  if (err != 0) {
+    SerialMon.print("HTTP GET failed, error: ");
+    SerialMon.println(err);
+    delay(10000);
+    return;
+  }
+
+  int status = http.responseStatusCode();
+  SerialMon.print("Status: ");
+  SerialMon.println(status);
+
+  SerialMon.println("Response headers:");
+  while (http.headerAvailable()) {
+    String name  = http.readHeaderName();
+    String value = http.readHeaderValue();
+    SerialMon.println(" " + name + ":" + value);
+  }
+
+  String body = http.responseBody();
+  SerialMon.println("Body:");
+  SerialMon.println(body);
+
+  http.stop();
+
+  SerialMon.println("Done");
+  while (true) delay(1000); // stop
+}
+
+void Current_sensor(){
+     rawI = energyMonitor.calcIrms(2048);
+   Current = rawI - irmsOffset;
+  if (Current < currentThreshold) Current = 0.0;
+  Power = Current * Voltage;
+
+}
+//////////////////////////////////////
+void loop() {
+  DateTime now = rtc.now();
+
+Current_sensor();
+  // ===== Температура =====
+  ds18b20.requestTemperatures();
+  float tempC = ds18b20.getTempCByIndex(0);
+
+  // ===== Проверка датчика =====
+  if (tempC == DEVICE_DISCONNECTED_C) {
+    Serial.println("DS18B20 ERROR: not detected");
+    tempC = -127.0;
+  }
+  else{
+  Serial.print("DS18B20=");
+  Serial.println(tempC);}
+ // ===== Лог =====
+  Serial.printf(
+    "%04d-%02d-%02d %02d:%02d:%02d | I=%.3f A | P=%.1f W\n",
+    now.year(), now.month(), now.day(),
+    now.hour(), now.minute(), now.second(),
+    Current, Power
+  );
+// ====== УПРАВЛЕНИЕ ОБОГРЕВОМ ======
+if (!heaterState && tempC <= TEMP_ON) {
+  digitalWrite(HEATER_PIN, HIGH);
+  heaterState = true;
+  Serial.println("🔥 HEATER ON (temp <= -5C)");
+}
+
+else if (heaterState && tempC >= TEMP_OFF) {
+  digitalWrite(HEATER_PIN, LOW);
+  heaterState = false;
+  Serial.println("❄ HEATER OFF (temp >= 0C)");
+}
+GSM_loop();
+  delay(1000);
+}
