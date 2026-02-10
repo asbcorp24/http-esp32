@@ -16,6 +16,7 @@ static Config defaultCfg() {
   c.cryptoPass = "12345678";
   c.adminLogin = "admin";
   c.adminPass  = "admin";
+  c.voltage = 220.0;
   return c;
 }
 bool isWifiConfigModeNow() {

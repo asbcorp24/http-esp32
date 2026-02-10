@@ -5,6 +5,7 @@
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include "ring_store.h"
+#include <Preferences.h>
 static EnergyMonitor energyMonitor;
 static RTC_DS3231 rtc;
 
@@ -13,7 +14,14 @@ static const uint8_t ONE_WIRE_BUS = 27;
 static OneWire oneWire(ONE_WIRE_BUS);
 static DallasTemperature ds18b20(&oneWire);
 
-static const float Voltage = 220.0;
+static Preferences prefs;
+static float Voltage = 220.0;
+
+static void loadVoltage() {
+  prefs.begin("cfg", true);
+  Voltage = prefs.getFloat("voltage", 220.0);
+  prefs.end();
+}
 static const float irmsOffset = 1.0;
 static const float currentThreshold = 0.10;
 
@@ -41,7 +49,7 @@ void SensorsInit() {
   pinMode(HEATER_PIN, OUTPUT);
   digitalWrite(HEATER_PIN, LOW);
   heaterState = false;
-
+loadVoltage();
   Wire.begin();
   rtc.begin();
 

@@ -26,6 +26,7 @@ static void loadConfig() {
   cfg.cryptoPass = prefGetString("cryptoPass", "12345678");
   cfg.adminLogin = prefGetString("adminLogin", "admin");
   cfg.adminPass  = prefGetString("adminPass",  "admin");
+  cfg.voltage = prefs.getFloat("voltage", 220.0);
 }
 static void saveConfig() {
   prefs.putString("serverHost", cfg.serverHost);
@@ -34,6 +35,7 @@ static void saveConfig() {
   prefs.putString("cryptoPass", cfg.cryptoPass);
   prefs.putString("adminLogin", cfg.adminLogin);
   prefs.putString("adminPass",  cfg.adminPass);
+  prefs.putFloat("voltage", cfg.voltage);
 }
 
 static bool requireAuth() {
@@ -84,7 +86,8 @@ static String htmlPage() {
   h += "<textarea name='location' maxlength='500'>";
   h += cfg.location;
   h += "</textarea>";
-
+  h += "<label>Напряжение сети (В)</label>";
+  h += "<input name='voltage' type='number' step='0.1' value='" + String(cfg.voltage) + "'/>";
   h += "<h1 style='margin-top:18px'>Доступ</h1>";
   h += "<div class='row'>";
   h += "<div><label>Логин</label><input name='adminLogin' value='" + cfg.adminLogin + "'/></div>";
@@ -125,7 +128,7 @@ static void webSetupRoutes() {
     if (web.hasArg("cryptoPass")) cfg.cryptoPass = web.arg("cryptoPass");
     if (web.hasArg("adminLogin")) cfg.adminLogin = web.arg("adminLogin");
     if (web.hasArg("adminPass"))  cfg.adminPass  = web.arg("adminPass");
-
+    if (web.hasArg("voltage"))     cfg.voltage = web.arg("voltage").toFloat();
     if (cfg.location.length() > 500) cfg.location = cfg.location.substring(0, 500);
     if (cfg.cryptoPass.length() < 8) cfg.cryptoPass = "12345678";
     if (!cfg.serverPort) cfg.serverPort = 33775;

@@ -11,6 +11,7 @@ struct Config {
   String cryptoPass;   // default 12345678
   String adminLogin;   // default admin
   String adminPass;    // default admin
+   float voltage;   // ← ДОБАВИТЬ
 };
 
 bool WifiConfigModeActive();   // true if GPIO4 grounded at boot
