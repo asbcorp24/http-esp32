@@ -7,7 +7,7 @@
 #include "ring_store.h"
 #include <Preferences.h>
 static EnergyMonitor energyMonitor;
-static RTC_DS3231 rtc;
+  RTC_DS3231 rtc;
 
 // DS18B20 moved off GPIO4 to avoid conflict with WIFI_CFG_PIN
 static const uint8_t ONE_WIRE_BUS = 27;
@@ -64,7 +64,7 @@ loadVoltage();
 
 static void sensorsTask(void* pv) {
   (void)pv;
-
+  uint32_t lastStoreMs = 0;
   while (true) {
     // Current / Power
     double rawI = energyMonitor.calcIrms(2048);
@@ -90,17 +90,30 @@ Serial.println(power);
       hasData = true;
       xSemaphoreGive(dataMtx);
     }
+ // ---- запись в кольцо раз в 30 сек ----
+    if (millis() - lastStoreMs >= 30000) {
+      lastStoreMs = millis();
 
+      // RTC время (реальные секунды)
+      uint32_t ts = 0;
+      if (rtc.begin()) {
+        ts = (uint32_t)rtc.now().unixtime();
+      } else {
+        // fallback — если RTC недоступны (лучше чем 0)
+        ts = (uint32_t)(millis() / 1000);
+      }
     // === запись в кольцо ===
     SampleRec rec{};
-    rec.ts = millis() / 1000;  // или RTC unix time
+    rec.ts =ts;  // или RTC unix time
     rec.current_mA = (int32_t)(current * 1000);
     rec.power_dW   = (int32_t)(power * 10);
     rec.temp_cC    = (int16_t)(tempC * 100);
     rec.flags      = heaterState ? 1 : 0;
 
-    RingStoreAppend(rec);
-
+   bool ok = RingStoreAppend(rec);
+        Serial.printf("RingStoreAppend: %s ts=%u I=%ldmA P=%lddW T=%dcC\n",
+                    ok ? "OK" : "FAIL", rec.ts, rec.current_mA, rec.power_dW, rec.temp_cC);
+    }
     vTaskDelay(pdMS_TO_TICKS(10000)); // 1 минута
   }
 }

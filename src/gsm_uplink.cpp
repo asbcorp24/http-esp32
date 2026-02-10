@@ -11,7 +11,9 @@
 // ===================== Serial =====================
 #define SerialMon Serial
 #define SerialAT  Serial1
+#include <RTClib.h>
 
+extern RTC_DS3231 rtc;
 // ===================== APN =====================
 static const char apn[]  = "internet.tele2.ru";
 static const char guser[] = "";
@@ -249,7 +251,20 @@ static void doSyncTime(uint32_t& seq) {
   int status;
   String body;
   postBlob("/sync_time", blob.data(), blob.size(), status, body);
-SerialMon.print(body);
+ SerialMon.println("Time response:");
+  SerialMon.println(body);
+
+  // ---- парсим ts ----
+  int pos = body.indexOf("\"ts\":");
+  if (pos > 0) {
+    uint32_t ts = body.substring(pos + 5).toInt();
+
+    SerialMon.print("Setting RTC time: ");
+    SerialMon.println(ts);
+
+    rtc.adjust(DateTime(ts));
+  }
+
   seq++;
   saveSeq(seq);
 }
@@ -341,7 +356,7 @@ static void sendData(uint32_t& seq) {
 static void gsmTask(void* pv) {
   (void)pv;
 uint32_t lastTimeSync = 0;
-const uint32_t TIME_SYNC_INTERVAL = 40000; // 1 час
+const uint32_t TIME_SYNC_INTERVAL = 50000;//1000*60*15; // 1 час
   const uint32_t SEND_INTERVAL = 30000;
   uint32_t lastSend = 0;
 
