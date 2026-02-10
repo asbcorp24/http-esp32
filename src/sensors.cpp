@@ -71,7 +71,8 @@ static void sensorsTask(void* pv) {
     double current = rawI - irmsOffset;
     if (current < currentThreshold) current = 0.0;
     double power = current * Voltage;
-
+Serial.print(":");Serial.println(rawI);Serial.println(current);
+Serial.println(power);
     // Temp
     ds18b20.requestTemperatures();
     float tempC = ds18b20.getTempCByIndex(0);
