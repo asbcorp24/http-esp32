@@ -134,7 +134,7 @@ size_t RingStoreCountApprox() {
 }
 
 bool RingStoreAppend(const SampleRec& r) {
- // Serial.printf("Ring append: ts=%u\n", r.ts);
+
   File f = LittleFS.open(gPath, "r+");
   if (!f) return false;
 
@@ -161,20 +161,14 @@ bool RingStoreAppend(const SampleRec& r) {
 
   head++;
 
-  // если было full — tail тоже двигаем (перезапись)
-  if (isFull()) {
-    tail++;
-  }
-
-  // если head догнал tail — стало full (в кольце)
-  if (!isFull() && (head - tail) >= cap) {
-    putU32("full", 1);
-    // tail подтянем так, чтобы head-tail == cap
+  // если переполнили буфер — двигаем tail
+  if (head - tail > cap) {
     tail = head - cap;
   }
 
   putU32("head", head);
   putU32("tail", tail);
+
   return true;
 }
 
