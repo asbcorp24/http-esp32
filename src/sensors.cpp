@@ -52,9 +52,9 @@ void SensorsInit() {
 loadVoltage();
   Wire.begin();
   rtc.begin();
-
+analogReadResolution(12);
   // токовый датчик
-  energyMonitor.current(35, 82);
+energyMonitor.current(34, 50);
 
   // температура
   ds18b20.begin();
@@ -67,7 +67,7 @@ static void sensorsTask(void* pv) {
   uint32_t lastStoreMs = 0;
   while (true) {
     // Current / Power
-    double rawI = energyMonitor.calcIrms(2048);
+    double rawI = energyMonitor.calcIrms(1480); // 1480 samples = ~3 сек при 50 Гц
     double current = rawI - irmsOffset;
     if (current < currentThreshold) current = 0.0;
     double power = current * Voltage;
@@ -106,7 +106,7 @@ Serial.println(power);
     SampleRec rec{};
     rec.ts =ts;  // или RTC unix time
     rec.current_mA = (int32_t)(current * 1000);
-    rec.power_dW   = (int32_t)(power * 10);
+    rec.power_dW   = (int32_t)(power);
     rec.temp_cC    = (int16_t)(tempC * 100);
     rec.flags      = heaterState ? 1 : 0;
 
