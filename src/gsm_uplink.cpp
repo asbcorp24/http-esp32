@@ -174,7 +174,61 @@ static bool postBlob(const char* path,
   return (outStatus == 200);
 }
 
+static bool sendLatest(uint32_t& seq) {
+  SensorData s;
 
+  if (!SensorsGetLatest(s)) {
+    SerialMon.println("No latest data");
+    return false;
+  }
+
+  uint32_t rnd = esp_random();
+  String nonce = String(rnd, HEX);
+
+  String plain = "{";
+  plain += "\"device_id\":\"" + deviceId + "\",";
+  plain += "\"nonce\":\"" + nonce + "\",";
+  plain += "\"seq\":" + String(seq) + ",";
+  plain += "\"records\":[{";
+uint32_t ts = 0;
+
+if (rtc.begin()) {
+  ts = rtc.now().unixtime();
+} else {
+  ts = millis() / 1000;
+}
+
+plain += "\"ts\":" + String(ts) + ",";
+ 
+  plain += "\"current_mA\":" + String((int)(s.currentA * 1000)) + ",";
+  plain += "\"power_dW\":" + String((int)(s.powerW)) + ",";
+  plain += "\"temp_cC\":" + String((int)(s.tempC * 100));
+
+  plain += "}]}";
+
+  std::vector<uint8_t> blob;
+  if (!aesEncryptBlob(cryptoPass,
+        (uint8_t*)plain.c_str(),
+        plain.length(),
+        blob)) {
+    SerialMon.println("Encrypt fail latest");
+    return false;
+  }
+
+  int status;
+  String body;
+
+  bool ok = postBlob("/data", blob.data(), blob.size(), status, body);
+
+  if (ok && body.indexOf("OK") >= 0) {
+    SerialMon.println("Latest sent OK");
+    seq++;
+    saveSeq(seq);
+    return true;
+  }
+
+  return false;
+}
 
 
 
@@ -255,15 +309,19 @@ static void doSyncTime(uint32_t& seq) {
   SerialMon.println(body);
 
   // ---- парсим ts ----
-  int pos = body.indexOf("\"ts\":");
-  if (pos > 0) {
-    uint32_t ts = body.substring(pos + 5).toInt();
+int start = body.indexOf("\"ts\":") + 5;
+int end = body.indexOf(",", start);
+if (end < 0) end = body.indexOf("}", start);
+
+uint32_t ts = body.substring(start, end).toInt();
+ 
+ 
 
     SerialMon.print("Setting RTC time: ");
     SerialMon.println(ts);
 
     rtc.adjust(DateTime(ts));
-  }
+  
 
   seq++;
   saveSeq(seq);
@@ -380,8 +438,19 @@ const uint32_t TIME_SYNC_INTERVAL = 50000;//1000*60*15; // 1 час
         doSyncTime(seq);
         lastTimeSync = millis();
     }
-      // 2) отправка данных
-      sendData(seq);
+size_t backlog = RingStoreCountApprox();
+
+// 1. если есть свежие данные → отправляем их
+bool sentLatest = sendLatest(seq);
+
+// 2. если backlog большой → НЕ лезем сразу в старые
+if (backlog > 10) {
+  SerialMon.println("Backlog large → skip old for now");
+  return;
+}
+
+// 3. если backlog маленький → отправляем старые
+sendData(seq);
     }
 
     vTaskDelay(pdMS_TO_TICKS(500));

@@ -8,7 +8,7 @@
 #include <Preferences.h>
 static EnergyMonitor energyMonitor;
   RTC_DS3231 rtc;
-
+bool rtcOk = false;
 // DS18B20 moved off GPIO4 to avoid conflict with WIFI_CFG_PIN
 static const uint8_t ONE_WIRE_BUS = 27;
 static OneWire oneWire(ONE_WIRE_BUS);
@@ -51,7 +51,7 @@ void SensorsInit() {
   heaterState = false;
 loadVoltage();
   Wire.begin();
-  rtc.begin();
+rtcOk = rtc.begin();
 analogReadResolution(12);
   // токовый датчик
 energyMonitor.current(34, 50);
