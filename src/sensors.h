@@ -7,6 +7,7 @@ struct SensorData {
   double powerW;
   bool heaterState;
   uint32_t tsMs;
+  uint32_t ts;
 };
 
 void SensorsInit();

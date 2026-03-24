@@ -198,7 +198,7 @@ if (rtc.begin()) {
   ts = millis() / 1000;
 }
 
-plain += "\"ts\":" + String(ts) + ",";
+plain += "\"ts\":" + String(s.ts) + ",";
  
   plain += "\"current_mA\":" + String((int)(s.currentA * 1000)) + ",";
   plain += "\"power_dW\":" + String((int)(s.powerW)) + ",";

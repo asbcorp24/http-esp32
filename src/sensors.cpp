@@ -86,7 +86,15 @@ Serial.println(power);
       latest.currentA = current;
       latest.powerW = power;
       latest.heaterState = heaterState;
-      latest.tsMs = millis();
+    uint32_t ts = 0;
+
+if (rtcOk) {
+  ts = rtc.now().unixtime();
+} else {
+  ts = millis() / 1000;
+}
+
+latest.ts = ts;
       hasData = true;
       xSemaphoreGive(dataMtx);
     }
