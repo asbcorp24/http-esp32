@@ -1,49 +1,51 @@
 #include "gsm_uplink.h"
 
-#include <TinyGsmClient.h>
-#include <ArduinoHttpClient.h>
+#include <ArduinoJson.h>
 #include <Preferences.h>
-
-#include "sensors.h"
-#include "ring_store.h"
-#include "crypto_aes.h"
-
-// ===================== Serial =====================
-#define SerialMon Serial
-#define SerialAT  Serial1
 #include <RTClib.h>
+#include <TinyGsmClient.h>
+
+#include "crypto_aes.h"
+#include "ring_store.h"
+#include "sensors.h"
+
+#define SerialMon Serial
+#define SerialAT Serial1
 
 extern RTC_DS3231 rtc;
-// ===================== APN =====================
-static const char apn[]  = "internet.tele2.ru";
+
+static const char apn[] = "internet.tele2.ru";
 static const char guser[] = "";
 static const char gpass[] = "";
 
-// ===================== GSM =====================
 static TinyGsm modem(SerialAT);
 static TinyGsmClient gsmClient(modem);
 
-// ===================== CONFIG =====================
 static Preferences prefs;
 static String cfgHost;
 static uint16_t cfgPort;
 static String cryptoPass;
-
-// ===================== DEVICE =====================
+static uint16_t sampleIntervalSec;
 static String deviceId;
 
-// ===================== HELPERS =====================
+static uint16_t clampInterval(uint16_t v) {
+  if (v < 15) return 15;
+  if (v > 60) return 60;
+  return v;
+}
+
 static void loadUplinkCfg() {
   prefs.begin("cfg", true);
-  cfgHost    = prefs.getString("serverHost", "78.138.169.178");
-  cfgPort    = prefs.getUShort("serverPort", 33775);
+  cfgHost = prefs.getString("serverHost", "specdpo.ru");
+  cfgPort = prefs.getUShort("serverPort", 80);
   cryptoPass = prefs.getString("cryptoPass", "12345678");
+  sampleIntervalSec = clampInterval(prefs.getUShort("sampleInt", 30));
   prefs.end();
 }
 
 static uint32_t loadSeq() {
   prefs.begin("uplink", false);
-  uint32_t seq = prefs.getUInt("seq", 1);
+  const uint32_t seq = prefs.getUInt("seq", 1);
   prefs.end();
   return seq;
 }
@@ -55,299 +57,181 @@ static void saveSeq(uint32_t seq) {
 }
 
 static String makeDeviceId() {
-  uint64_t mac = ESP.getEfuseMac();
+  const uint64_t mac = ESP.getEfuseMac();
   char buf[24];
   sprintf(buf, "esp32-%04X%08X", (uint16_t)(mac >> 32), (uint32_t)mac);
   return String(buf);
 }
 
-// ===================== HTTP POST =====================
-/*static bool postBlob(const char* path,
-                     const uint8_t* blob,
-                     size_t blobLen,
-                     int& outStatus,
-                     String& outBody) {
+static bool readHttpResponse(int& outStatus, String& outBody) {
+  unsigned long startedAt = millis();
+  while (!gsmClient.available()) {
+    if (!gsmClient.connected() || millis() - startedAt > 15000) {
+      outStatus = -3;
+      outBody = "";
+      return false;
+    }
+    delay(20);
+  }
 
-  HttpClient http(gsmClient, cfgHost.c_str(), cfgPort);
+  String statusLine = gsmClient.readStringUntil('\n');
+  statusLine.trim();
+  outStatus = -1;
+  if (statusLine.startsWith("HTTP/1.1") || statusLine.startsWith("HTTP/1.0")) {
+    outStatus = statusLine.substring(9, 12).toInt();
+  }
 
-  http.beginRequest();
-  http.post(path);
-  http.sendHeader("Content-Type", "application/octet-stream");
-  http.sendHeader("Content-Length", blobLen);
-  http.beginBody();
-  http.write(blob, blobLen);
-  http.endRequest();
+  while (gsmClient.connected()) {
+    String headerLine = gsmClient.readStringUntil('\n');
+    headerLine.trim();
+    if (headerLine.length() == 0) break;
+  }
 
-  outStatus = http.responseStatusCode();
-  outBody   = http.responseBody();
-  http.stop();
+  outBody = "";
+  unsigned long lastDataAt = millis();
+  while (millis() - lastDataAt < 2000) {
+    while (gsmClient.available()) {
+      outBody += gsmClient.readString();
+      lastDataAt = millis();
+    }
+    if (!gsmClient.connected() && !gsmClient.available()) break;
+    delay(20);
+  }
 
-  SerialMon.printf("POST %s -> %d '%s'\n",
-                   path, outStatus, outBody.c_str());
-
-  return (outStatus == 200);
+  return outStatus == 200;
 }
-*/
-/**/
 
 static bool postBlob(const char* path,
                      const uint8_t* blob,
                      size_t blobLen,
                      int& outStatus,
                      String& outBody) {
-
-  SerialMon.println("---- HTTP POST BEGIN ----");
-    SerialMon.println(path);
-
   if (!modem.isGprsConnected()) {
-    SerialMon.println("GPRS NOT CONNECTED!");
     outStatus = -100;
+    outBody = "";
     return false;
   }
 
   gsmClient.stop();
   delay(100);
 
-  SerialMon.println("Opening TCP...");
-
   if (!gsmClient.connect(cfgHost.c_str(), cfgPort)) {
-    SerialMon.println("TCP connect FAILED");
     outStatus = -101;
+    outBody = "";
     return false;
   }
 
-  SerialMon.println("TCP connected");
-
-  // ===== HTTP HEADER =====
   gsmClient.print("POST ");
   gsmClient.print(path);
   gsmClient.println(" HTTP/1.1");
-
   gsmClient.print("Host: ");
   gsmClient.println(cfgHost);
-
   gsmClient.println("Connection: close");
   gsmClient.println("Content-Type: application/octet-stream");
-
   gsmClient.print("Content-Length: ");
   gsmClient.println(blobLen);
-
   gsmClient.println();
-
-  // ===== BODY =====
   gsmClient.write(blob, blobLen);
 
-  SerialMon.println("Request sent");
-
-  // ===== READ RESPONSE =====
-  unsigned long t0 = millis();
-  while (!gsmClient.available()) {
-    if (millis() - t0 > 15000) {
-      SerialMon.println("Response timeout");
-      gsmClient.stop();
-      outStatus = -3;
-      return false;
-    }
-  }
-
-  String statusLine = gsmClient.readStringUntil('\n');
-  SerialMon.print("STATUS LINE: ");
-  SerialMon.println(statusLine);
-
-  int code = -1;
-  if (statusLine.startsWith("HTTP/1.1")) {
-    code = statusLine.substring(9, 12).toInt();
-  }
-
-  outStatus = code;
-
-  outBody = "";
-  while (gsmClient.available()) {
-    outBody += gsmClient.readString();
-  }
-
-  SerialMon.printf("HTTP STATUS: %d\n", outStatus);
-  SerialMon.println("---- HTTP POST END ----");
-
+  const bool ok = readHttpResponse(outStatus, outBody);
   gsmClient.stop();
-
-  return (outStatus == 200);
+  return ok;
 }
 
-static bool sendLatest(uint32_t& seq) {
-  SensorData s;
-
-  if (!SensorsGetLatest(s)) {
-    SerialMon.println("No latest data");
-    return false;
-  }
-
-  uint32_t rnd = esp_random();
-  String nonce = String(rnd, HEX);
-
-  String plain = "{";
-  plain += "\"device_id\":\"" + deviceId + "\",";
-  plain += "\"nonce\":\"" + nonce + "\",";
-  plain += "\"seq\":" + String(seq) + ",";
-  plain += "\"records\":[{";
-uint32_t ts = 0;
-
-if (rtc.begin()) {
-  ts = rtc.now().unixtime();
-} else {
-  ts = millis() / 1000;
-}
-
-plain += "\"ts\":" + String(s.ts) + ",";
- 
-  plain += "\"current_mA\":" + String((int)(s.currentA * 1000)) + ",";
-  plain += "\"power_dW\":" + String((int)(s.powerW)) + ",";
-  plain += "\"temp_cC\":" + String((int)(s.tempC * 100));
-
-  plain += "}]}";
-
+static bool postEncrypted(const char* path, const String& plain, int& outStatus, String& outBody) {
   std::vector<uint8_t> blob;
-  if (!aesEncryptBlob(cryptoPass,
-        (uint8_t*)plain.c_str(),
-        plain.length(),
-        blob)) {
-    SerialMon.println("Encrypt fail latest");
+  if (!aesEncryptBlob(cryptoPass, (const uint8_t*)plain.c_str(), plain.length(), blob)) {
+    outStatus = -200;
+    outBody = "";
     return false;
   }
-
-  int status;
-  String body;
-
-  bool ok = postBlob("/data", blob.data(), blob.size(), status, body);
-
-  if (ok && body.indexOf("OK") >= 0) {
-    SerialMon.println("Latest sent OK");
-    seq++;
-    saveSeq(seq);
-    return true;
-  }
-
-  return false;
+  return postBlob(path, blob.data(), blob.size(), outStatus, outBody);
 }
 
+static bool parseJson(const String& body, DynamicJsonDocument& doc) {
+  const DeserializationError err = deserializeJson(doc, body);
+  if (err) {
+    SerialMon.print("JSON parse failed: ");
+    SerialMon.println(err.c_str());
+    SerialMon.println(body);
+    return false;
+  }
+  return true;
+}
 
+static String makeNonce() {
+  return String((uint32_t)esp_random(), HEX);
+}
 
-// ===================== REGISTER =====================
 static bool doRegister(uint32_t& seq) {
-
-  SerialMon.println("Registering device...");
-
-  // ---- nonce ----
-  uint32_t rnd = esp_random();
-  String nonce = String(rnd, HEX);
-
-  // ---- JSON ----
   String plain = "{";
   plain += "\"device_id\":\"" + deviceId + "\",";
-  plain += "\"nonce\":\"" + nonce + "\",";
+  plain += "\"nonce\":\"" + makeNonce() + "\",";
   plain += "\"seq\":" + String(seq);
   plain += "}";
 
-  SerialMon.println("Register JSON:");
-  SerialMon.println(plain);
-
-  // ---- encrypt ----
-  std::vector<uint8_t> blob;
-  if (!aesEncryptBlob(
-        cryptoPass,
-        (uint8_t*)plain.c_str(),
-        plain.length(),
-        blob)) {
-
-    SerialMon.println("AES encrypt failed");
-    return false;
-  }
-
-  SerialMon.print("Encrypted size: ");
-  SerialMon.println(blob.size());
-
-  int status;
+  int status = 0;
   String body;
+  const bool ok = postEncrypted("/register", plain, status, body);
+  if (!ok) return false;
 
-  bool ok = postBlob("/register", blob.data(), blob.size(), status, body);
-
-  SerialMon.print("Register status=");
-  SerialMon.println(status);
-
-  SerialMon.print("Register body=");
-  SerialMon.println(body);
-
-  if (ok && body.indexOf("OK") >= 0) {
-    SerialMon.println("Register success");
-
+  if (body.indexOf("\"OK\"") >= 0) {
     seq++;
     saveSeq(seq);
     return true;
   }
-
-  SerialMon.println("Register failed");
   return false;
 }
 
-// ===================== SYNC TIME =====================
 static void doSyncTime(uint32_t& seq) {
   String plain = "{";
   plain += "\"device_id\":\"" + deviceId + "\",";
+  plain += "\"nonce\":\"" + makeNonce() + "\",";
   plain += "\"seq\":" + String(seq);
   plain += "}";
 
-  std::vector<uint8_t> blob;
-  if (!aesEncryptBlob(cryptoPass,
-        (uint8_t*)plain.c_str(),
-        plain.length(),
-        blob)) return;
-
-  int status;
+  int status = 0;
   String body;
-  postBlob("/sync_time", blob.data(), blob.size(), status, body);
- SerialMon.println("Time response:");
-  SerialMon.println(body);
+  if (!postEncrypted("/sync_time", plain, status, body)) return;
 
-  // ---- парсим ts ----
-int start = body.indexOf("\"ts\":") + 5;
-int end = body.indexOf(",", start);
-if (end < 0) end = body.indexOf("}", start);
+  DynamicJsonDocument doc(256);
+  if (!parseJson(body, doc)) return;
+  const uint32_t ts = doc["ts"] | 0;
+  if (ts == 0) return;
 
-uint32_t ts = body.substring(start, end).toInt();
- 
- 
-
-    SerialMon.print("Setting RTC time: ");
-    SerialMon.println(ts);
-
-    rtc.adjust(DateTime(ts));
-  
-
+  rtc.adjust(DateTime(ts));
   seq++;
   saveSeq(seq);
 }
 
-// ===================== SEND DATA =====================
-static void sendData(uint32_t& seq) {
-  SerialMon.print("Sending data, seq=");
-  SerialMon.println(seq);
+static void applyRelayCommandFromBody(const String& body) {
+  DynamicJsonDocument doc(256);
+  if (!parseJson(body, doc)) return;
+  const bool relayOn = doc["relay_on"] | false;
+  SensorsSetRemoteRelayDesired(relayOn);
+}
 
-  std::vector<SampleRec> batch;
-  size_t n = RingStoreReadBatch(batch, 1); // маленький пакет для SIM900
-  if (n == 0) {
-    SerialMon.println("No data in ring buffer");
-    return;
-  }
-
-  // ---- nonce ----
-  uint32_t rnd = esp_random();
-  String nonce = String(rnd, HEX);
-
-  // ---- JSON ----
+static void pollControl(uint32_t& seq) {
   String plain = "{";
   plain += "\"device_id\":\"" + deviceId + "\",";
-  plain += "\"nonce\":\"" + nonce + "\",";
-  plain += "\"seq\":" + String(seq) + ",";
+  plain += "\"nonce\":\"" + makeNonce() + "\",";
+  plain += "\"seq\":" + String(seq);
+  plain += "}";
+
+  int status = 0;
+  String body;
+  const bool ok = postEncrypted("/control", plain, status, body);
+  if (!ok) return;
+
+  applyRelayCommandFromBody(body);
+  seq++;
+  saveSeq(seq);
+}
+
+static String buildRecordsJson(const std::vector<SampleRec>& batch) {
+  String plain = "{";
+  plain += "\"device_id\":\"" + deviceId + "\",";
+  plain += "\"nonce\":\"" + makeNonce() + "\",";
   plain += "\"records\":[";
 
   for (size_t i = 0; i < batch.size(); i++) {
@@ -355,72 +239,56 @@ static void sendData(uint32_t& seq) {
 
     plain += "{";
     plain += "\"ts\":" + String(batch[i].ts) + ",";
-    plain += "\"current_mA\":" + String(batch[i].current_mA) + ",";
+    plain += "\"current1_mA\":" + String(batch[i].current1_mA) + ",";
+    plain += "\"current2_mA\":" + String(batch[i].current2_mA) + ",";
+    plain += "\"current3_mA\":" + String(batch[i].current3_mA) + ",";
     plain += "\"power_dW\":" + String(batch[i].power_dW) + ",";
-    plain += "\"temp_cC\":" + String(batch[i].temp_cC);
+    plain += "\"temp1_cC\":" + String(batch[i].temp1_cC) + ",";
+    plain += "\"temp2_cC\":" + String(batch[i].temp2_cC) + ",";
+    plain += "\"phase_imbalance_dPct\":" + String(batch[i].phaseImbalance_dPct) + ",";
+    plain += "\"relay_on\":" + String((batch[i].flags & SAMPLE_FLAG_RELAY_ON) ? 1 : 0) + ",";
+    plain += "\"heater_on\":" + String((batch[i].flags & SAMPLE_FLAG_HEATER_ON) ? 1 : 0) + ",";
+    plain += "\"phase_trip\":" + String((batch[i].flags & SAMPLE_FLAG_PHASE_TRIP) ? 1 : 0) + ",";
+    plain += "\"relay_cmd_on\":" + String((batch[i].flags & SAMPLE_FLAG_RELAY_CMD_ON) ? 1 : 0);
     plain += "}";
   }
 
   plain += "]}";
+  return plain;
+}
 
-  SerialMon.println("JSON payload:");
-  SerialMon.println(plain);
+static void sendData(uint32_t& seq) {
+  std::vector<SampleRec> batch;
+  const size_t n = RingStoreReadBatch(batch, 2);
+  if (n == 0) return;
 
-  // ---- encrypt ----
-  std::vector<uint8_t> blob;
-  if (!aesEncryptBlob(
-        cryptoPass,
-        (uint8_t*)plain.c_str(),
-        plain.length(),
-        blob)) {
-    SerialMon.println("AES encrypt failed");
+  int status = 0;
+  String body;
+  const String plain = buildRecordsJson(batch);
+  const bool ok = postEncrypted("/data", plain, status, body);
+  if (ok && body.indexOf("\"OK\"") >= 0) {
+    RingStoreDrop(batch.size());
+    seq++;
+    saveSeq(seq);
     return;
   }
 
-  SerialMon.print("Encrypted size: ");
-  SerialMon.println(blob.size());
-
-  int status;
-  String body;
-
-  bool ok = postBlob("/data", blob.data(), blob.size(), status, body);
-
-  SerialMon.print("Server status=");
-  SerialMon.println(status);
-  SerialMon.print("Server body=");
-  SerialMon.println(body);
-
-  // ---- success ----
-  if (ok && body.indexOf("OK") >= 0) {
-    SerialMon.println("Data accepted, dropping from ring");
-    RingStoreDrop(batch.size());
-
-    seq++;
-    saveSeq(seq);
-  }
-  // ---- not registered ----
-  else if (body.indexOf("notreg") >= 0) {
-    SerialMon.println("Device not registered -> registering");
-
-    if (doRegister(seq)) {
-      SerialMon.println("Register OK, retry send");
-      sendData(seq);
-    }
+  if (body.indexOf("notreg") >= 0 && doRegister(seq)) {
+    sendData(seq);
   }
 }
 
-
-// ===================== TASK =====================
 static void gsmTask(void* pv) {
   (void)pv;
-uint32_t lastTimeSync = 0;
-const uint32_t TIME_SYNC_INTERVAL = 50000;//1000*60*15; // 1 час
-  const uint32_t SEND_INTERVAL = 30000;
-  uint32_t lastSend = 0;
 
+  uint32_t lastTimeSync = 0;
+  uint32_t lastSend = 0;
   uint32_t seq = loadSeq();
+  const uint32_t timeSyncIntervalMs = 1000UL * 60UL * 60UL;
 
   while (true) {
+    loadUplinkCfg();
+
     if (!modem.isGprsConnected()) {
       SerialMon.println("GPRS disconnected, reconnect...");
       modem.gprsConnect(apn, guser, gpass);
@@ -428,36 +296,22 @@ const uint32_t TIME_SYNC_INTERVAL = 50000;//1000*60*15; // 1 час
       continue;
     }
 
-    if (millis() - lastSend >= SEND_INTERVAL) {
-      lastSend = millis();
-
-      loadUplinkCfg();
-
-      // 1) синк времени (редко, но пусть тут)
-     if (millis() - lastTimeSync > TIME_SYNC_INTERVAL) {
-        doSyncTime(seq);
-        lastTimeSync = millis();
+    const uint32_t nowMs = millis();
+    if (nowMs - lastTimeSync >= timeSyncIntervalMs) {
+      doSyncTime(seq);
+      lastTimeSync = nowMs;
     }
-size_t backlog = RingStoreCountApprox();
 
-// 1. если есть свежие данные → отправляем их
-bool sentLatest = sendLatest(seq);
-
-// 2. если backlog большой → НЕ лезем сразу в старые
-if (backlog > 10) {
-  SerialMon.println("Backlog large → skip old for now");
-  return;
-}
-
-// 3. если backlog маленький → отправляем старые
-sendData(seq);
+    if (nowMs - lastSend >= sampleIntervalSec * 1000UL) {
+      lastSend = nowMs;
+      pollControl(seq);
+      sendData(seq);
     }
 
     vTaskDelay(pdMS_TO_TICKS(500));
   }
 }
 
-// ===================== API =====================
 void GsmInit() {
   loadUplinkCfg();
   deviceId = makeDeviceId();
@@ -479,13 +333,5 @@ void GsmInit() {
 }
 
 void GsmStartTask() {
-  xTaskCreatePinnedToCore(
-    gsmTask,
-    "gsmTask",
-    8192,
-    nullptr,
-    2,
-    nullptr,
-    1
-  );
+  xTaskCreatePinnedToCore(gsmTask, "gsmTask", 8192, nullptr, 2, nullptr, 1);
 }

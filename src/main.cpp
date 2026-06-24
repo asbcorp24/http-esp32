@@ -9,14 +9,15 @@
 // Дефолты для конфига (если в Preferences пусто)
 static Config defaultCfg() {
   Config c;
-  //c.serverHost = "78.138.169.178";
   c.serverHost = "specdpo.ru";
-  c.serverPort = 80;//33775;
+  c.serverPort = 80;
   c.location   = "";
   c.cryptoPass = "12345678";
   c.adminLogin = "admin";
   c.adminPass  = "admin";
   c.voltage = 220.0;
+  c.sampleIntervalSec = 30;
+  c.phaseImbalancePct = 10;
   return c;
 }
 bool isWifiConfigModeNow() {

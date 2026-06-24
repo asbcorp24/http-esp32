@@ -2,14 +2,22 @@
 #include <Arduino.h>
 
 struct SensorData {
-  float tempC;
-  double currentA;
+  float temp1C;
+  float temp2C;
+  double current1A;
+  double current2A;
+  double current3A;
   double powerW;
+  float phaseImbalancePct;
   bool heaterState;
-  uint32_t tsMs;
+  bool relayState;
+  bool relayCommandOn;
+  bool phaseTrip;
   uint32_t ts;
 };
 
 void SensorsInit();
 void SensorsStartTasks();
-bool SensorsGetLatest(SensorData& out); // non-blocking (returns false if no data yet)
+bool SensorsGetLatest(SensorData& out);
+void SensorsSetRemoteRelayDesired(bool on);
+bool SensorsGetRemoteRelayDesired();

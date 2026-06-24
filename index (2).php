@@ -1,33 +1,14 @@
 <?php
-// index.php
-
 declare(strict_types=1);
 
 require_once __DIR__ . "/config.php";
 require_once __DIR__ . "/crypto.php";
 require_once __DIR__ . "/logger.php";
+
 header("Content-Type: application/json; charset=utf-8");
+
 $rawBody = file_get_contents("php://input");
 
-$headers = [];
-foreach ($_SERVER as $k => $v) {
-    if (strpos($k, "HTTP_") === 0) {
-        $headers[$k] = $v;
-    }
-}
-
-log_line("RAW_REQUEST", [ 
-    "time"   => date("Y-m-d H:i:s"),
-    "ip"     => $_SERVER["REMOTE_ADDR"] ?? "",
-    "method" => $_SERVER["REQUEST_METHOD"] ?? "",
-    "uri"    => $_SERVER["REQUEST_URI"] ?? "",
-    "headers"=> $headers,
-    "body_len" => strlen($rawBody),
-    "body_hex_head" => bin_preview($rawBody, 128),
-]);
-// -------------------------
-// response helper
-// -------------------------
 function json_ok(array $data, int $code = 200): void {
     if (defined("DEBUG_LOG") && DEBUG_LOG) {
         log_line("RESPONSE", ["code" => $code, "data" => $data]);
@@ -36,16 +17,32 @@ function json_ok(array $data, int $code = 200): void {
     echo json_encode($data, JSON_UNESCAPED_UNICODE);
     exit;
 }
-// -------------------------
-// DB
-// -------------------------
+
 function pdo(): PDO {
     static $pdo = null;
-    if ($pdo instanceof PDO) return $pdo;
+    if ($pdo instanceof PDO) {
+        return $pdo;
+    }
 
     $pdo = new PDO("sqlite:" . DB_PATH);
     $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
     return $pdo;
+}
+
+function has_column(PDO $db, string $table, string $column): bool {
+    $st = $db->query("PRAGMA table_info($table)");
+    foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $row) {
+        if (($row["name"] ?? "") === $column) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function ensure_column(PDO $db, string $table, string $column, string $definition): void {
+    if (!has_column($db, $table, $column)) {
+        $db->exec("ALTER TABLE $table ADD COLUMN $column $definition");
+    }
 }
 
 function init_db(): void {
@@ -62,9 +59,17 @@ function init_db(): void {
         CREATE TABLE IF NOT EXISTS data (
             device_id TEXT,
             ts INTEGER,
-            current_mA INTEGER,
+            current1_mA INTEGER,
+            current2_mA INTEGER,
+            current3_mA INTEGER,
             power_dW INTEGER,
-            temp_cC INTEGER
+            temp1_cC INTEGER,
+            temp2_cC INTEGER,
+            phase_imbalance_dPct INTEGER,
+            relay_on INTEGER,
+            heater_on INTEGER,
+            phase_trip INTEGER,
+            relay_cmd_on INTEGER
         );
     ");
 
@@ -76,20 +81,43 @@ function init_db(): void {
         );
     ");
 
+    $db->exec("
+        CREATE TABLE IF NOT EXISTS device_control (
+            device_id TEXT PRIMARY KEY,
+            relay_on INTEGER NOT NULL DEFAULT 0,
+            updated INTEGER NOT NULL DEFAULT 0
+        );
+    ");
+
+    ensure_column($db, "data", "current1_mA", "INTEGER");
+    ensure_column($db, "data", "current2_mA", "INTEGER");
+    ensure_column($db, "data", "current3_mA", "INTEGER");
+    ensure_column($db, "data", "power_dW", "INTEGER");
+    ensure_column($db, "data", "temp1_cC", "INTEGER");
+    ensure_column($db, "data", "temp2_cC", "INTEGER");
+    ensure_column($db, "data", "phase_imbalance_dPct", "INTEGER");
+    ensure_column($db, "data", "relay_on", "INTEGER");
+    ensure_column($db, "data", "heater_on", "INTEGER");
+    ensure_column($db, "data", "phase_trip", "INTEGER");
+    ensure_column($db, "data", "relay_cmd_on", "INTEGER");
+
     $db->exec("CREATE INDEX IF NOT EXISTS idx_data_device_ts ON data(device_id, ts);");
     $db->exec("CREATE INDEX IF NOT EXISTS idx_nonces_device_nonce ON nonces(device_id, nonce);");
 }
 
 function is_registered(string $device_id): bool {
-    $db = pdo();
-    $st = $db->prepare("SELECT 1 FROM devices WHERE id=? LIMIT 1");
+    $st = pdo()->prepare("SELECT 1 FROM devices WHERE id=? LIMIT 1");
     $st->execute([$device_id]);
     return (bool)$st->fetchColumn();
 }
 
 function register_device(string $device_id): void {
     $db = pdo();
+
     $st = $db->prepare("INSERT OR IGNORE INTO devices(id, created) VALUES (?, ?)");
+    $st->execute([$device_id, time()]);
+
+    $st = $db->prepare("INSERT OR IGNORE INTO device_control(device_id, relay_on, updated) VALUES (?, 0, ?)");
     $st->execute([$device_id, time()]);
 }
 
@@ -98,219 +126,191 @@ function check_nonce(string $device_id, string $nonce): bool {
 
     $st = $db->prepare("SELECT 1 FROM nonces WHERE device_id=? AND nonce=? LIMIT 1");
     $st->execute([$device_id, $nonce]);
-    if ($st->fetchColumn()) return false;
+    if ($st->fetchColumn()) {
+        return false;
+    }
 
     $ins = $db->prepare("INSERT INTO nonces(device_id, nonce, ts) VALUES (?, ?, ?)");
     $ins->execute([$device_id, $nonce, time()]);
     return true;
 }
 
-// -------------------------
-// Router
-// -------------------------
-try {
-    if (defined("DEBUG_LOG") && DEBUG_LOG) {
+function get_relay_desired(string $device_id): bool {
+    $st = pdo()->prepare("SELECT relay_on FROM device_control WHERE device_id=? LIMIT 1");
+    $st->execute([$device_id]);
+    return (bool)$st->fetchColumn();
+}
 
-    $headers = [];
-    foreach ($_SERVER as $k => $v) {
-        if (strpos($k, "HTTP_") === 0) {
-            $headers[$k] = $v;
-        }
+function set_relay_desired(string $device_id, bool $state): void {
+    register_device($device_id);
+    $st = pdo()->prepare("
+        INSERT INTO device_control(device_id, relay_on, updated)
+        VALUES (?, ?, ?)
+        ON CONFLICT(device_id) DO UPDATE SET relay_on=excluded.relay_on, updated=excluded.updated
+    ");
+    $st->execute([$device_id, $state ? 1 : 0, time()]);
+}
+
+function parse_bool_state($value): ?bool {
+    if (is_bool($value)) {
+        return $value;
+    }
+    if (is_int($value) || ctype_digit((string)$value)) {
+        return ((int)$value) !== 0;
     }
 
-    log_line("REQUEST_IN", [
-        "time"   => time(),
-        "ip"     => $_SERVER["REMOTE_ADDR"] ?? null,
-        "method" => $_SERVER["REQUEST_METHOD"] ?? null,
-        "uri"    => $_SERVER["REQUEST_URI"] ?? null,
-        "headers"=> $headers
-    ]);
+    $value = strtolower(trim((string)$value));
+    if (in_array($value, ["1", "on", "true", "enable", "enabled"], true)) {
+        return true;
+    }
+    if (in_array($value, ["0", "off", "false", "disable", "disabled"], true)) {
+        return false;
+    }
+    return null;
 }
 
-init_db();
-
-$method = $_SERVER["REQUEST_METHOD"] ?? "GET";
-$uri = $_SERVER["REQUEST_URI"] ?? "/";
-$path = parse_url($uri, PHP_URL_PATH) ?? "/";
-$path = preg_replace("~^/index\.php~", "", $path);
-if ($path === "") $path = "/";
-
-// -------------------------
-// GET /sync_time
-// -------------------------
-if (($method === "GET" || $method === "POST")&& $path === "/sync_time") {
-    json_ok(["ts" => time()]);
-}
-
-// For POST endpoints: read raw
-if ($method === "POST") {
-$blob = $rawBody;
-
-if (DEBUG_LOG) {
-    log_line("RAW_BODY", [
-        "len" => strlen($blob),
-        "hex_head" => bin_preview($blob, 64),
-    ]);
-}
-    if ($blob === false || strlen($blob) === 0) {
-        if (DEBUG_LOG) log_line("POST_EMPTY");
+function decrypt_payload_or_400(string $rawBody): array {
+    if ($rawBody === "") {
         json_ok(["status" => "empty"], 400);
     }
 
-    if (DEBUG_LOG) {
-        log_line("POST_BLOB", [
-            "len" => strlen($blob),
-            "head_hex" => bin_preview($blob, 32),
-        ]);
-    }
-
-    $pass = SERVER_CRYPTO_PASS;
-
-    [$ok, $plain, $err] = aes_decrypt_blob($pass, $blob);
+    [$ok, $plain, $err] = aes_decrypt_blob(SERVER_CRYPTO_PASS, $rawBody);
     if (!$ok) {
-        if (DEBUG_LOG) log_line("DECRYPT_FAIL", ["err" => $err]);
         json_ok(["status" => "badenc", "err" => $err], 400);
-    }
-
-    if (DEBUG_LOG) {
-        log_line("DECRYPT_OK", ["plain_len" => strlen($plain)]);
     }
 
     $payload = json_decode($plain, true);
     if (!is_array($payload)) {
-        if (DEBUG_LOG) log_line("JSON_FAIL");
         json_ok(["status" => "badjson"], 400);
     }
 
-    if (DEBUG_LOG && defined("DEBUG_DUMP_JSON") && DEBUG_DUMP_JSON) {
-        log_line("JSON_DUMP", $payload);
-    } else if (DEBUG_LOG) {
-        // без полного дампа: только ключевые поля
-        log_line("JSON_KEYS", [
-            "device_id" => $payload["device_id"] ?? null,
-            "nonce" => $payload["nonce"] ?? null,
-            "records_n" => is_array($payload["records"] ?? null) ? count($payload["records"]) : null,
-        ]);
-    }
+    return $payload;
 }
 
-// -------------------------
-// POST /register
-// plain contains JSON with device_id, etc
-// -------------------------
-if ($method === "POST" && $path === "/register") {
-    $device_id = $payload["device_id"] ?? "";
-    if (!is_string($device_id) || $device_id === "") {
-        json_ok(["status" => "badreq"], 400);
+try {
+    init_db();
+
+    $method = $_SERVER["REQUEST_METHOD"] ?? "GET";
+    $uri = $_SERVER["REQUEST_URI"] ?? "/";
+    $path = parse_url($uri, PHP_URL_PATH) ?? "/";
+    $path = preg_replace("~^/index\.php~", "", $path);
+    if ($path === "") {
+        $path = "/";
     }
 
-    register_device($device_id);
-    json_ok(["status" => "OK"]);
-}
-
-// -------------------------
-// POST /data
-// expects: device_id, nonce, records[]
-// -------------------------
-if ($method === "POST" && $path === "/data") {
-    $device_id = $payload["device_id"] ?? "";
-    $nonce     = $payload["nonce"] ?? "";
-    $records   = $payload["records"] ?? null;
-
-    if (DEBUG_LOG) {
-        log_line("DATA_REQUEST", [
-            "device_id" => $device_id,
-            "nonce"     => $nonce,
-            "records_n" => is_array($records) ? count($records) : null
-        ]);
+    if (($method === "GET" || $method === "POST") && $path === "/sync_time") {
+        json_ok(["ts" => time()]);
     }
 
-    // ---- проверка структуры ----
-    if (!is_string($device_id) || $device_id === "" ||
-        !is_string($nonce) || $nonce === "" ||
-        !is_array($records)) {
+    if (($method === "GET" || $method === "POST") && $path === "/relay_set") {
+        $device_id = (string)($_REQUEST["device_id"] ?? "");
+        $state = parse_bool_state($_REQUEST["state"] ?? null);
 
-        if (DEBUG_LOG) log_line("DATA_BADREQ");
-        json_ok(["status" => "badreq"], 400);
-    }
-
-    // ---- регистрация ----
-    if (!is_registered($device_id)) {
-        if (DEBUG_LOG) {
-            log_line("DATA_NOT_REGISTERED", [
-                "device_id" => $device_id
-            ]);
+        if ($device_id === "" || $state === null) {
+            json_ok(["status" => "badreq"], 400);
         }
+
+        set_relay_desired($device_id, $state);
+        json_ok(["status" => "OK", "device_id" => $device_id, "relay_on" => $state]);
+    }
+
+    if (($method === "GET" || $method === "POST") && $path === "/relay_state") {
+        $device_id = (string)($_REQUEST["device_id"] ?? "");
+        if ($device_id === "") {
+            json_ok(["status" => "badreq"], 400);
+        }
+
+        json_ok(["status" => "OK", "device_id" => $device_id, "relay_on" => get_relay_desired($device_id)]);
+    }
+
+    if ($method !== "POST") {
+        json_ok(["status" => "nf"], 404);
+    }
+
+    $payload = decrypt_payload_or_400((string)$rawBody);
+
+    $device_id = (string)($payload["device_id"] ?? "");
+    $nonce = (string)($payload["nonce"] ?? "");
+
+    if ($path === "/register") {
+        if ($device_id === "") {
+            json_ok(["status" => "badreq"], 400);
+        }
+
+        register_device($device_id);
+        json_ok(["status" => "OK"]);
+    }
+
+    if ($device_id === "" || $nonce === "") {
+        json_ok(["status" => "badreq"], 400);
+    }
+
+    if (!is_registered($device_id)) {
         json_ok(["status" => "notreg"], 403);
     }
 
-    // ---- защита от повторов ----
     if (!check_nonce($device_id, $nonce)) {
-        if (DEBUG_LOG) {
-            log_line("DATA_REPLAY", [
-                "device_id" => $device_id,
-                "nonce" => $nonce
-            ]);
-        }
         json_ok(["status" => "replay"], 403);
     }
 
-    // ---- запись ----
-    $db = pdo();
-    $db->beginTransaction();
-
-    $ins = $db->prepare(
-        "INSERT INTO data(device_id, ts, current_mA, power_dW, temp_cC)
-         VALUES (?, ?, ?, ?, ?)"
-    );
-
-    $saved = 0;
-
-  foreach ($records as $r) {
-    if (!is_array($r)) continue;
-
-    $ts         = (int)($r["ts"] ?? 0);
-    $current_mA = (int)($r["current_mA"] ?? 0);
-    $power_dW   = (int)($r["power_dW"] ?? 0);
-    $temp_cC    = (int)($r["temp_cC"] ?? 0);
-
-    if (DEBUG_LOG) {
-        log_line("DATA_RECORD", [
+    if ($path === "/control") {
+        json_ok([
+            "status" => "OK",
             "device_id" => $device_id,
-            "ts" => $ts,
-            "current_mA" => $current_mA,
-            "power_dW" => $power_dW,
-            "temp_cC" => $temp_cC
+            "relay_on" => get_relay_desired($device_id),
         ]);
     }
 
-    if ($ts <= 0) continue;
+    if ($path === "/data") {
+        $records = $payload["records"] ?? null;
+        if (!is_array($records)) {
+            json_ok(["status" => "badreq"], 400);
+        }
 
-    $ins->execute([
-        $device_id,
-        $ts,
-        $current_mA,
-        $power_dW,
-        $temp_cC
-    ]);
+        $db = pdo();
+        $db->beginTransaction();
 
-    $saved++;
-}
+        $ins = $db->prepare("
+            INSERT INTO data(
+                device_id, ts, current1_mA, current2_mA, current3_mA, power_dW,
+                temp1_cC, temp2_cC, phase_imbalance_dPct, relay_on, heater_on, phase_trip, relay_cmd_on
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ");
 
+        $saved = 0;
+        foreach ($records as $r) {
+            if (!is_array($r)) {
+                continue;
+            }
 
-    $db->commit();
+            $ts = (int)($r["ts"] ?? 0);
+            if ($ts <= 0) {
+                continue;
+            }
 
-    if (DEBUG_LOG) {
-        log_line("DATA_SAVED", [
-            "device_id" => $device_id,
-            "saved_rows" => $saved
-        ]);
+            $ins->execute([
+                $device_id,
+                $ts,
+                (int)($r["current1_mA"] ?? 0),
+                (int)($r["current2_mA"] ?? 0),
+                (int)($r["current3_mA"] ?? 0),
+                (int)($r["power_dW"] ?? 0),
+                (int)($r["temp1_cC"] ?? 0),
+                (int)($r["temp2_cC"] ?? 0),
+                (int)($r["phase_imbalance_dPct"] ?? 0),
+                (int)($r["relay_on"] ?? 0),
+                (int)($r["heater_on"] ?? 0),
+                (int)($r["phase_trip"] ?? 0),
+                (int)($r["relay_cmd_on"] ?? 0),
+            ]);
+            $saved++;
+        }
+
+        $db->commit();
+        json_ok(["status" => "OK", "saved" => $saved]);
     }
 
-    json_ok(["status" => "OK"]);
-}
-
-json_ok(["status" => "nf"], 404);
+    json_ok(["status" => "nf"], 404);
 } catch (Throwable $e) {
     if (defined("DEBUG_LOG") && DEBUG_LOG) {
         log_exception($e, "FATAL");

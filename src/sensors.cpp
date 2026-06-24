@@ -1,134 +1,256 @@
 #include "sensors.h"
+#include "ring_store.h"
+#include <math.h>
+#include <Preferences.h>
+#include <RTClib.h>
 #include <Wire.h>
 #include "EmonLib.h"
-#include "RTClib.h"
 #include <OneWire.h>
 #include <DallasTemperature.h>
-#include "ring_store.h"
-#include <Preferences.h>
-static EnergyMonitor energyMonitor;
-  RTC_DS3231 rtc;
-bool rtcOk = false;
-// DS18B20 moved off GPIO4 to avoid conflict with WIFI_CFG_PIN
-static const uint8_t ONE_WIRE_BUS = 27;
-static OneWire oneWire(ONE_WIRE_BUS);
+
+RTC_DS3231 rtc;
+
+static EnergyMonitor phase1Monitor;
+static EnergyMonitor phase2Monitor;
+static EnergyMonitor phase3Monitor;
+static bool rtcOk = false;
+
+static const uint8_t TEMP_BUS_PIN = 18;
+static const uint8_t CURRENT1_PIN = 34;
+static const uint8_t CURRENT2_PIN = 32;
+static const uint8_t CURRENT3_PIN = 33;
+static const uint8_t PUMP_RELAY_PIN = 26;
+static const uint8_t HEATER_PIN = 12;
+
+static const float CURRENT_CALIBRATION = 50.0f;
+static const float CURRENT_THRESHOLD_A = 0.10f;
+static const float PHASE_DETECT_MIN_CURRENT_A = 0.50f;
+static const float TEMP_ON_C = -5.0f;
+static const float TEMP_OFF_C = 0.0f;
+
+static OneWire oneWire(TEMP_BUS_PIN);
 static DallasTemperature ds18b20(&oneWire);
+static DeviceAddress tempAddr1{};
+static DeviceAddress tempAddr2{};
+static bool hasTemp1 = false;
+static bool hasTemp2 = false;
 
 static Preferences prefs;
-static float Voltage = 220.0;
-
-static void loadVoltage() {
-  prefs.begin("cfg", true);
-  Voltage = prefs.getFloat("voltage", 220.0);
-  prefs.end();
-}
-static const float irmsOffset = 1.0;
-static const float currentThreshold = 0.10;
-
-static const int HEATER_PIN = 25;
-static const float TEMP_ON  = -5.0;
-static const float TEMP_OFF = 0.0;
-
+static float supplyVoltage = 220.0f;
+static uint16_t sampleIntervalSec = 30;
+static uint8_t phaseImbalanceLimitPct = 10;
+static bool relayCommandOn = false;
+static bool phaseTripLatched = false;
+static bool relayState = false;
 static bool heaterState = false;
 
 static SensorData latest{};
 static bool hasData = false;
 static SemaphoreHandle_t dataMtx;
 
-static void heaterControl(float tempC) {
-  if (!heaterState && tempC <= TEMP_ON) {
+static uint16_t clampInterval(uint16_t v) {
+  if (v < 15) return 15;
+  if (v > 60) return 60;
+  return v;
+}
+
+static uint8_t clampPhasePct(uint8_t v) {
+  if (v > 20) return 20;
+  return v;
+}
+
+static void saveRelayCommand() {
+  prefs.begin("cfg", false);
+  prefs.putBool("relayCmd", relayCommandOn);
+  prefs.end();
+}
+
+static void loadConfig() {
+  prefs.begin("cfg", true);
+  supplyVoltage = prefs.getFloat("voltage", 220.0f);
+  sampleIntervalSec = clampInterval(prefs.getUShort("sampleInt", 30));
+  phaseImbalanceLimitPct = clampPhasePct((uint8_t)prefs.getUChar("phasePct", 10));
+  relayCommandOn = prefs.getBool("relayCmd", false);
+  prefs.end();
+}
+
+static uint32_t nowTs() {
+  if (rtcOk) {
+    return rtc.now().unixtime();
+  }
+  return millis() / 1000;
+}
+
+static void setRelayOutput(bool on) {
+  relayState = on;
+  digitalWrite(PUMP_RELAY_PIN, on ? HIGH : LOW);
+}
+
+static void updateRelayOutput() {
+  const bool shouldOn = relayCommandOn && !phaseTripLatched;
+  setRelayOutput(shouldOn);
+}
+
+static void heaterControl(float controlTempC) {
+  if (!heaterState && controlTempC <= TEMP_ON_C) {
     digitalWrite(HEATER_PIN, HIGH);
     heaterState = true;
-  } else if (heaterState && tempC >= TEMP_OFF) {
+  } else if (heaterState && controlTempC >= TEMP_OFF_C) {
     digitalWrite(HEATER_PIN, LOW);
     heaterState = false;
   }
 }
 
-void SensorsInit() {
-  pinMode(HEATER_PIN, OUTPUT);
-  digitalWrite(HEATER_PIN, LOW);
-  heaterState = false;
-loadVoltage();
-  Wire.begin();
-rtcOk = rtc.begin();
-analogReadResolution(12);
-  // токовый датчик
-energyMonitor.current(34, 50);
+static float sanitizeCurrent(double rawI) {
+  if (rawI < CURRENT_THRESHOLD_A) return 0.0f;
+  return (float)rawI;
+}
 
-  // температура
+static float readTemperatureByAddress(const DeviceAddress addr, bool valid) {
+  if (!valid) return -127.0f;
+  const float tempC = ds18b20.getTempC(addr);
+  return tempC == DEVICE_DISCONNECTED_C ? -127.0f : tempC;
+}
+
+static float computePhaseImbalancePct(float i1, float i2, float i3) {
+  const float avg = (i1 + i2 + i3) / 3.0f;
+  if (avg < PHASE_DETECT_MIN_CURRENT_A) return 0.0f;
+
+  const float d1 = fabsf(i1 - avg);
+  const float d2 = fabsf(i2 - avg);
+  const float d3 = fabsf(i3 - avg);
+  const float maxDev = max(d1, max(d2, d3));
+  return (maxDev / avg) * 100.0f;
+}
+
+static void updateLatest(const SensorData& snapshot) {
+  if (xSemaphoreTake(dataMtx, pdMS_TO_TICKS(50)) != pdTRUE) return;
+  latest = snapshot;
+  hasData = true;
+  xSemaphoreGive(dataMtx);
+}
+
+void SensorsSetRemoteRelayDesired(bool on) {
+  const bool changed = relayCommandOn != on;
+  relayCommandOn = on;
+  if (on && changed) {
+    phaseTripLatched = false;
+  }
+  if (!on) {
+    phaseTripLatched = false;
+  }
+  saveRelayCommand();
+  updateRelayOutput();
+}
+
+bool SensorsGetRemoteRelayDesired() {
+  return relayCommandOn;
+}
+
+void SensorsInit() {
+  pinMode(PUMP_RELAY_PIN, OUTPUT);
+  pinMode(HEATER_PIN, OUTPUT);
+  digitalWrite(PUMP_RELAY_PIN, LOW);
+  digitalWrite(HEATER_PIN, LOW);
+
+  loadConfig();
+  updateRelayOutput();
+
+  Wire.begin();
+  rtcOk = rtc.begin();
+
+  analogReadResolution(12);
+  phase1Monitor.current(CURRENT1_PIN, CURRENT_CALIBRATION);
+  phase2Monitor.current(CURRENT2_PIN, CURRENT_CALIBRATION);
+  phase3Monitor.current(CURRENT3_PIN, CURRENT_CALIBRATION);
+
   ds18b20.begin();
+  hasTemp1 = ds18b20.getAddress(tempAddr1, 0);
+  hasTemp2 = ds18b20.getAddress(tempAddr2, 1);
 
   dataMtx = xSemaphoreCreateMutex();
 }
 
 static void sensorsTask(void* pv) {
   (void)pv;
-  uint32_t lastStoreMs = 0;
+
   while (true) {
-    // Current / Power
-    double rawI = energyMonitor.calcIrms(1480); // 1480 samples = ~3 сек при 50 Гц
-    double current = rawI - irmsOffset;
-    if (current < currentThreshold) current = 0.0;
-    double power = current * Voltage;
-Serial.print(":");Serial.println(rawI);Serial.println(current);
-Serial.println(power);
-    // Temp
+    loadConfig();
+
+    const float current1 = sanitizeCurrent(phase1Monitor.calcIrms(1480));
+    const float current2 = sanitizeCurrent(phase2Monitor.calcIrms(1480));
+    const float current3 = sanitizeCurrent(phase3Monitor.calcIrms(1480));
+    const float currentSum = current1 + current2 + current3;
+    const double powerW = currentSum * supplyVoltage;
+
     ds18b20.requestTemperatures();
-    float tempC = ds18b20.getTempCByIndex(0);
-    if (tempC == DEVICE_DISCONNECTED_C) tempC = -127.0;
+    const float temp1C = readTemperatureByAddress(tempAddr1, hasTemp1);
+    const float temp2C = readTemperatureByAddress(tempAddr2, hasTemp2);
+    const float controlTempC = temp1C > -100.0f ? temp1C : temp2C;
+    heaterControl(controlTempC > -100.0f ? controlTempC : 25.0f);
 
-    heaterControl(tempC);
-
-    // publish
-    if (xSemaphoreTake(dataMtx, pdMS_TO_TICKS(30)) == pdTRUE) {
-      latest.tempC = tempC;
-      latest.currentA = current;
-      latest.powerW = power;
-      latest.heaterState = heaterState;
-    uint32_t ts = 0;
-
-if (rtcOk) {
-  ts = rtc.now().unixtime();
-} else {
-  ts = millis() / 1000;
-}
-
-latest.ts = ts;
-      hasData = true;
-      xSemaphoreGive(dataMtx);
+    const float phaseImbalancePct = computePhaseImbalancePct(current1, current2, current3);
+    if (relayCommandOn && relayState && phaseImbalancePct > phaseImbalanceLimitPct) {
+      phaseTripLatched = true;
+      updateRelayOutput();
+    } else {
+      updateRelayOutput();
     }
- // ---- запись в кольцо раз в 30 сек ----
-    if (millis() - lastStoreMs >= 30000) {
-      lastStoreMs = millis();
 
-      // RTC время (реальные секунды)
-      uint32_t ts = 0;
-      if (rtc.begin()) {
-        ts = (uint32_t)rtc.now().unixtime();
-      } else {
-        // fallback — если RTC недоступны (лучше чем 0)
-        ts = (uint32_t)(millis() / 1000);
-      }
-    // === запись в кольцо ===
+    SensorData snapshot{};
+    snapshot.temp1C = temp1C;
+    snapshot.temp2C = temp2C;
+    snapshot.current1A = current1;
+    snapshot.current2A = current2;
+    snapshot.current3A = current3;
+    snapshot.powerW = powerW;
+    snapshot.phaseImbalancePct = phaseImbalancePct;
+    snapshot.heaterState = heaterState;
+    snapshot.relayState = relayState;
+    snapshot.relayCommandOn = relayCommandOn;
+    snapshot.phaseTrip = phaseTripLatched;
+    snapshot.ts = nowTs();
+    updateLatest(snapshot);
+
     SampleRec rec{};
-    rec.ts =ts;  // или RTC unix time
-    rec.current_mA = (int32_t)(current * 1000);
-    rec.power_dW   = (int32_t)(power);
-    rec.temp_cC    = (int16_t)(tempC * 100);
-    rec.flags      = heaterState ? 1 : 0;
+    rec.ts = snapshot.ts;
+    rec.current1_mA = (int32_t)(snapshot.current1A * 1000.0);
+    rec.current2_mA = (int32_t)(snapshot.current2A * 1000.0);
+    rec.current3_mA = (int32_t)(snapshot.current3A * 1000.0);
+    rec.power_dW = (int32_t)(snapshot.powerW * 10.0);
+    rec.temp1_cC = (int16_t)(snapshot.temp1C * 100.0f);
+    rec.temp2_cC = (int16_t)(snapshot.temp2C * 100.0f);
+    rec.phaseImbalance_dPct = (uint16_t)(snapshot.phaseImbalancePct * 10.0f);
+    rec.flags = 0;
+    if (snapshot.relayState) rec.flags |= SAMPLE_FLAG_RELAY_ON;
+    if (snapshot.heaterState) rec.flags |= SAMPLE_FLAG_HEATER_ON;
+    if (snapshot.phaseTrip) rec.flags |= SAMPLE_FLAG_PHASE_TRIP;
+    if (snapshot.relayCommandOn) rec.flags |= SAMPLE_FLAG_RELAY_CMD_ON;
 
-   bool ok = RingStoreAppend(rec);
-        Serial.printf("RingStoreAppend: %s ts=%u I=%ldmA P=%lddW T=%dcC\n",
-                    ok ? "OK" : "FAIL", rec.ts, rec.current_mA, rec.power_dW, rec.temp_cC);
-    }
-    vTaskDelay(pdMS_TO_TICKS(10000)); // 1 минута
+    const bool ok = RingStoreAppend(rec);
+    Serial.printf(
+      "Sample %s ts=%u I=[%ld,%ld,%ld]mA P=%lddW T=[%d,%d]cC phase=%u.%u%% relay=%d cmd=%d trip=%d\n",
+      ok ? "OK" : "FAIL",
+      rec.ts,
+      rec.current1_mA,
+      rec.current2_mA,
+      rec.current3_mA,
+      rec.power_dW,
+      rec.temp1_cC,
+      rec.temp2_cC,
+      rec.phaseImbalance_dPct / 10,
+      rec.phaseImbalance_dPct % 10,
+      snapshot.relayState,
+      snapshot.relayCommandOn,
+      snapshot.phaseTrip
+    );
+
+    vTaskDelay(pdMS_TO_TICKS(sampleIntervalSec * 1000UL));
   }
 }
 
-
 void SensorsStartTasks() {
-  xTaskCreatePinnedToCore(sensorsTask, "sensorsTask", 4096, nullptr, 2, nullptr, 1);
+  xTaskCreatePinnedToCore(sensorsTask, "sensorsTask", 6144, nullptr, 2, nullptr, 1);
 }
 
 bool SensorsGetLatest(SensorData& out) {
