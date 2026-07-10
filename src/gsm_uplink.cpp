@@ -3,6 +3,7 @@
 #include <ArduinoJson.h>
 #include <Preferences.h>
 #include <RTClib.h>
+#include <StreamDebugger.h>
 #include <TinyGsmClient.h>
 
 #include "crypto_aes.h"
@@ -12,13 +13,16 @@
 #define SerialMon Serial
 #define SerialAT Serial1
 
+static const bool GSM_AT_DEBUG = true;
+
 extern RTC_DS3231 rtc;
 
 static const char apn[] = "internet.tele2.ru";
 static const char guser[] = "";
 static const char gpass[] = "";
 
-static TinyGsm modem(SerialAT);
+static StreamDebugger modemDebugger(SerialAT, SerialMon);
+static TinyGsm modem(GSM_AT_DEBUG ? (Stream&)modemDebugger : (Stream&)SerialAT);
 static TinyGsmClient gsmClient(modem);
 
 static Preferences prefs;
@@ -318,6 +322,10 @@ void GsmInit() {
 
   SerialAT.begin(9600, SERIAL_8N1, 16, 17);
   delay(300);
+
+  if (GSM_AT_DEBUG) {
+    SerialMon.println("[GSM] AT debug enabled");
+  }
 
   SerialMon.println("Restart modem");
   modem.restart();
