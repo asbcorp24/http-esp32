@@ -178,11 +178,10 @@ void SensorsSetRemoteRelayDesired(bool on) {
     phaseTripLatched ? 1 : 0,
     relayState ? 1 : 0
   );
-  const bool changed = relayCommandOn != on;
   relayCommandOn = on;
-  if (on && changed) {
+  if (on) {
     phaseTripLatched = false;
-    Serial.println("[RELAY] phase trip latch cleared by new ON command");
+    Serial.println("[RELAY] phase trip latch cleared by ON command");
   }
   if (!on) {
     phaseTripLatched = false;
