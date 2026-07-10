@@ -127,10 +127,22 @@ function get_relay_desired(string $device_id): bool {
 
 function set_relay_desired(string $device_id, bool $state): void {
     register_device($device_id);
-    $st = pdo()->prepare("
-        INSERT INTO device_control(device_id, relay_on, updated)
-        VALUES (?, ?, ?)
-        ON CONFLICT(device_id) DO UPDATE SET relay_on=excluded.relay_on, updated=excluded.updated
+    $db = pdo();
+    $updated = time();
+    $relayOn = $state ? 1 : 0;
+
+    $st = $db->prepare("
+        UPDATE device_control
+        SET relay_on = ?, updated = ?
+        WHERE device_id = ?
     ");
-    $st->execute([$device_id, $state ? 1 : 0, time()]);
+    $st->execute([$relayOn, $updated, $device_id]);
+
+    if ($st->rowCount() === 0) {
+        $ins = $db->prepare("
+            INSERT OR IGNORE INTO device_control(device_id, relay_on, updated)
+            VALUES (?, ?, ?)
+        ");
+        $ins->execute([$device_id, $relayOn, $updated]);
+    }
 }

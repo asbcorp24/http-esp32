@@ -21,3 +21,4 @@ void SensorsStartTasks();
 bool SensorsGetLatest(SensorData& out);
 void SensorsSetRemoteRelayDesired(bool on);
 bool SensorsGetRemoteRelayDesired();
+void SensorsSetSyncedTime(uint32_t ts);

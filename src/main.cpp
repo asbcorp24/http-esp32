@@ -9,6 +9,7 @@
 // Дефолты для конфига (если в Preferences пусто)
 static Config defaultCfg() {
   Config c;
+  c.apn = "internet.tele2.ru";
   c.serverHost = "specdpo.ru";
   c.serverPort = 80;
   c.location   = "";

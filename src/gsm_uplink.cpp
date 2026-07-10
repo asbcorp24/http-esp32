@@ -17,7 +17,6 @@ static const bool GSM_AT_DEBUG = true;
 
 extern RTC_DS3231 rtc;
 
-static const char apn[] = "internet.tele2.ru";
 static const char guser[] = "";
 static const char gpass[] = "";
 
@@ -26,6 +25,7 @@ static TinyGsm modem(GSM_AT_DEBUG ? (Stream&)modemDebugger : (Stream&)SerialAT);
 static TinyGsmClient gsmClient(modem);
 
 static Preferences prefs;
+static String cfgApn;
 static String cfgHost;
 static uint16_t cfgPort;
 static String cryptoPass;
@@ -40,6 +40,7 @@ static uint16_t clampInterval(uint16_t v) {
 
 static void loadUplinkCfg() {
   prefs.begin("cfg", true);
+  cfgApn = prefs.getString("apn", "internet.tele2.ru");
   cfgHost = prefs.getString("serverHost", "specdpo.ru");
   cfgPort = prefs.getUShort("serverPort", 80);
   cryptoPass = prefs.getString("cryptoPass", "12345678");
@@ -73,6 +74,7 @@ static bool readHttpResponse(int& outStatus, String& outBody) {
     if (!gsmClient.connected() || millis() - startedAt > 15000) {
       outStatus = -3;
       outBody = "";
+      SerialMon.println("[HTTP] response timeout or disconnected before headers");
       return false;
     }
     delay(20);
@@ -80,6 +82,8 @@ static bool readHttpResponse(int& outStatus, String& outBody) {
 
   String statusLine = gsmClient.readStringUntil('\n');
   statusLine.trim();
+  SerialMon.print("[HTTP] status line: ");
+  SerialMon.println(statusLine);
   outStatus = -1;
   if (statusLine.startsWith("HTTP/1.1") || statusLine.startsWith("HTTP/1.0")) {
     outStatus = statusLine.substring(9, 12).toInt();
@@ -88,6 +92,10 @@ static bool readHttpResponse(int& outStatus, String& outBody) {
   while (gsmClient.connected()) {
     String headerLine = gsmClient.readStringUntil('\n');
     headerLine.trim();
+    if (headerLine.length()) {
+      SerialMon.print("[HTTP] header: ");
+      SerialMon.println(headerLine);
+    }
     if (headerLine.length() == 0) break;
   }
 
@@ -102,6 +110,8 @@ static bool readHttpResponse(int& outStatus, String& outBody) {
     delay(20);
   }
 
+  SerialMon.printf("[HTTP] parsed status=%d body=%s\n", outStatus, outBody.c_str());
+
   return outStatus == 200;
 }
 
@@ -113,6 +123,7 @@ static bool postBlob(const char* path,
   if (!modem.isGprsConnected()) {
     outStatus = -100;
     outBody = "";
+    SerialMon.println("[HTTP] GPRS is not connected");
     return false;
   }
 
@@ -122,8 +133,11 @@ static bool postBlob(const char* path,
   if (!gsmClient.connect(cfgHost.c_str(), cfgPort)) {
     outStatus = -101;
     outBody = "";
+    SerialMon.printf("[HTTP] connect failed host=%s port=%u\n", cfgHost.c_str(), cfgPort);
     return false;
   }
+
+  SerialMon.printf("[HTTP] POST %s host=%s port=%u blobLen=%u\n", path, cfgHost.c_str(), cfgPort, (unsigned)blobLen);
 
   gsmClient.print("POST ");
   gsmClient.print(path);
@@ -144,9 +158,11 @@ static bool postBlob(const char* path,
 
 static bool postEncrypted(const char* path, const String& plain, int& outStatus, String& outBody) {
   std::vector<uint8_t> blob;
+  SerialMon.printf("[HTTP] plain %s payload=%s\n", path, plain.c_str());
   if (!aesEncryptBlob(cryptoPass, (const uint8_t*)plain.c_str(), plain.length(), blob)) {
     outStatus = -200;
     outBody = "";
+    SerialMon.printf("[HTTP] encrypt failed for %s\n", path);
     return false;
   }
   return postBlob(path, blob.data(), blob.size(), outStatus, outBody);
@@ -196,14 +212,22 @@ static void doSyncTime(uint32_t& seq) {
 
   int status = 0;
   String body;
-  if (!postEncrypted("/sync_time", plain, status, body)) return;
+  if (!postEncrypted("/sync_time", plain, status, body)) {
+    SerialMon.printf("[TIME] sync failed status=%d body=%s\n", status, body.c_str());
+    return;
+  }
 
   DynamicJsonDocument doc(256);
   if (!parseJson(body, doc)) return;
   const uint32_t ts = doc["ts"] | 0;
-  if (ts == 0) return;
+  if (ts == 0) {
+    SerialMon.println("[TIME] sync response has zero ts");
+    return;
+  }
 
+  SensorsSetSyncedTime(ts);
   rtc.adjust(DateTime(ts));
+  SerialMon.printf("[TIME] rtc adjusted ts=%u rtcOk_assumed=1\n", ts);
   seq++;
   saveSeq(seq);
 }
@@ -212,6 +236,7 @@ static void applyRelayCommandFromBody(const String& body) {
   DynamicJsonDocument doc(256);
   if (!parseJson(body, doc)) return;
   const bool relayOn = doc["relay_on"] | false;
+  SerialMon.printf("[RELAY] /control response relay_on=%d body=%s\n", relayOn ? 1 : 0, body.c_str());
   SensorsSetRemoteRelayDesired(relayOn);
 }
 
@@ -225,7 +250,10 @@ static void pollControl(uint32_t& seq) {
   int status = 0;
   String body;
   const bool ok = postEncrypted("/control", plain, status, body);
-  if (!ok) return;
+  if (!ok) {
+    SerialMon.printf("[RELAY] /control failed status=%d body=%s\n", status, body.c_str());
+    return;
+  }
 
   applyRelayCommandFromBody(body);
   seq++;
@@ -295,7 +323,7 @@ static void gsmTask(void* pv) {
 
     if (!modem.isGprsConnected()) {
       SerialMon.println("GPRS disconnected, reconnect...");
-      modem.gprsConnect(apn, guser, gpass);
+      modem.gprsConnect(cfgApn.c_str(), guser, gpass);
       vTaskDelay(pdMS_TO_TICKS(5000));
       continue;
     }
@@ -337,7 +365,7 @@ void GsmInit() {
   modem.waitForNetwork(60000);
 
   SerialMon.print("Connecting GPRS...");
-  modem.gprsConnect(apn, guser, gpass);
+  modem.gprsConnect(cfgApn.c_str(), guser, gpass);
 }
 
 void GsmStartTask() {

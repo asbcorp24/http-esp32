@@ -30,6 +30,7 @@ static uint8_t clampPhasePct(uint8_t v) {
 }
 
 static void loadConfig() {
+  cfg.apn = prefGetString("apn", "internet.tele2.ru");
   cfg.serverHost = prefGetString("serverHost", "specdpo.ru");
   cfg.serverPort = prefGetUShort("serverPort", 80);
   cfg.location = prefGetString("location", "");
@@ -44,6 +45,7 @@ static void loadConfig() {
 }
 
 static void saveConfig() {
+  prefs.putString("apn", cfg.apn);
   prefs.putString("serverHost", cfg.serverHost);
   prefs.putUShort("serverPort", cfg.serverPort);
   prefs.putString("location", cfg.location);
@@ -93,6 +95,8 @@ static String htmlPage() {
 
   h += "<h2>GSM / сервер</h2>";
   h += "<label>Адрес сервера (IP / домен)</label>";
+  h += "<label>APN</label>";
+  h += "<input name='apn' required value='" + cfg.apn + "'/>";
   h += "<input name='serverHost' required value='" + cfg.serverHost + "'/>";
 
   h += "<div class='row'>";
@@ -150,6 +154,7 @@ static void webSetupRoutes() {
   web.on("/save", HTTP_POST, []() {
     if (!requireAuth()) return;
 
+    if (web.hasArg("apn")) cfg.apn = web.arg("apn");
     if (web.hasArg("serverHost")) cfg.serverHost = web.arg("serverHost");
     if (web.hasArg("serverPort")) cfg.serverPort = (uint16_t)web.arg("serverPort").toInt();
     if (web.hasArg("location")) cfg.location = web.arg("location");
@@ -160,6 +165,8 @@ static void webSetupRoutes() {
     if (web.hasArg("sampleIntervalSec")) cfg.sampleIntervalSec = (uint16_t)web.arg("sampleIntervalSec").toInt();
     if (web.hasArg("phaseImbalancePct")) cfg.phaseImbalancePct = (uint8_t)web.arg("phaseImbalancePct").toInt();
 
+    cfg.apn.trim();
+    if (!cfg.apn.length()) cfg.apn = "internet.tele2.ru";
     if (cfg.location.length() > 500) cfg.location = cfg.location.substring(0, 500);
     if (cfg.cryptoPass.length() < 8) cfg.cryptoPass = "12345678";
     if (!cfg.serverPort) cfg.serverPort = 80;
@@ -209,6 +216,7 @@ void WifiConfigStart(const Config& initialCfg) {
   prefs.begin("cfg", false);
   loadConfig();
 
+  if (!prefs.isKey("apn")) cfg.apn = initialCfg.apn;
   if (!prefs.isKey("serverHost")) cfg.serverHost = initialCfg.serverHost;
   if (!prefs.isKey("serverPort")) cfg.serverPort = initialCfg.serverPort;
   if (!prefs.isKey("location")) cfg.location = initialCfg.location;

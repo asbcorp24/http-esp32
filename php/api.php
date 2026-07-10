@@ -62,7 +62,7 @@ function device_filter_clause(string $deviceId, array &$params): string {
 }
 
 try {
-    $action = $_GET['action'] ?? '';
+    $action = (string)($_REQUEST['action'] ?? '');
     $db = pdo();
 
     switch ($action) {

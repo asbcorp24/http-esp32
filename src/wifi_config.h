@@ -5,6 +5,7 @@
 static const gpio_num_t WIFI_CFG_PIN = GPIO_NUM_4;
 
 struct Config {
+  String apn;
   String serverHost;
   uint16_t serverPort;
   String location;     // <=500
