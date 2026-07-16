@@ -52,7 +52,7 @@ static bool hasData = false;
 static SemaphoreHandle_t dataMtx;
 
 static void logRelayDecision(const char* reason) {
-  const bool shouldOn = relayCommandOn && !phaseTripLatched;
+  const bool shouldOn = relayCommandOn;
   Serial.printf(
     "[RELAY] %s cmd=%d trip=%d should=%d actual=%d pin=%d\n",
     reason,
@@ -120,14 +120,12 @@ static void setRelayOutput(bool on) {
 }
 
 static void updateRelayOutput() {
-  const bool shouldOn = relayCommandOn && !phaseTripLatched;
+  const bool shouldOn = relayCommandOn;
   setRelayOutput(shouldOn);
   if (!relayCommandOn) {
     logRelayDecision("blocked: command OFF");
-  } else if (phaseTripLatched) {
-    logRelayDecision("blocked: PHASE TRIP LATCHED");
   } else {
-    logRelayDecision("allowed");
+    logRelayDecision("allowed: direct remote control");
   }
 }
 
@@ -246,20 +244,20 @@ static void sensorsTask(void* pv) {
     heaterControl(controlTempC > -100.0f ? controlTempC : 25.0f);
 
     const float phaseImbalancePct = computePhaseImbalancePct(current1, current2, current3);
-    if (relayCommandOn && relayState && phaseImbalancePct > phaseImbalanceLimitPct) {
+    if (phaseImbalancePct > phaseImbalanceLimitPct) {
       phaseTripLatched = true;
       Serial.printf(
-        "[RELAY] PHASE TRIP imbalance=%.2f limit=%u currents=[%.3f,%.3f,%.3f]\n",
+        "[RELAY] PHASE TRIP detected but ignored for relay control imbalance=%.2f limit=%u currents=[%.3f,%.3f,%.3f]\n",
         phaseImbalancePct,
         phaseImbalanceLimitPct,
         current1,
         current2,
         current3
       );
-      updateRelayOutput();
     } else {
-      updateRelayOutput();
+      phaseTripLatched = false;
     }
+    updateRelayOutput();
 
     SensorData snapshot{};
     snapshot.temp1C = temp1C;
