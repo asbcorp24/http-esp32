@@ -71,10 +71,10 @@ static String makeDeviceId() {
 static bool readHttpResponse(int& outStatus, String& outBody) {
   unsigned long startedAt = millis();
   while (!gsmClient.available()) {
-    if (!gsmClient.connected() || millis() - startedAt > 15000) {
+    if (millis() - startedAt > 15000) {
       outStatus = -3;
       outBody = "";
-      SerialMon.println("[HTTP] response timeout or disconnected before headers");
+      SerialMon.println("[HTTP] response timeout before headers");
       return false;
     }
     delay(20);
@@ -89,7 +89,7 @@ static bool readHttpResponse(int& outStatus, String& outBody) {
     outStatus = statusLine.substring(9, 12).toInt();
   }
 
-  while (gsmClient.connected()) {
+  while (gsmClient.connected() || gsmClient.available()) {
     String headerLine = gsmClient.readStringUntil('\n');
     headerLine.trim();
     if (headerLine.length()) {
@@ -106,7 +106,14 @@ static bool readHttpResponse(int& outStatus, String& outBody) {
       outBody += gsmClient.readString();
       lastDataAt = millis();
     }
-    if (!gsmClient.connected() && !gsmClient.available()) break;
+    if (!gsmClient.connected()) {
+      delay(100);
+      while (gsmClient.available()) {
+        outBody += gsmClient.readString();
+        lastDataAt = millis();
+      }
+      break;
+    }
     delay(20);
   }
 

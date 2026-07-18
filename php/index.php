@@ -163,7 +163,7 @@ try {
         $db->beginTransaction();
 
         $ins = $db->prepare("
-            INSERT INTO data(
+            INSERT OR IGNORE INTO data(
                 device_id, ts, current1_mA, current2_mA, current3_mA, power_dW,
                 temp1_cC, temp2_cC, phase_imbalance_dPct, relay_on, heater_on, phase_trip, relay_cmd_on
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -215,7 +215,7 @@ try {
             }
 
             $ins->execute($row);
-            $saved++;
+            $saved += $ins->rowCount();
         }
 
         $db->commit();

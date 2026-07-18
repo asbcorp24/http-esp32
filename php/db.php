@@ -29,6 +29,17 @@ function ensure_column(PDO $db, string $table, string $column, string $definitio
     }
 }
 
+function dedupe_data_rows(PDO $db): void {
+    $db->exec("
+        DELETE FROM data
+        WHERE rowid NOT IN (
+            SELECT MIN(rowid)
+            FROM data
+            GROUP BY device_id, ts
+        )
+    ");
+}
+
 function init_db(): void {
     $db = pdo();
 
@@ -88,6 +99,14 @@ function init_db(): void {
     $db->exec("CREATE INDEX IF NOT EXISTS idx_data_ts ON data(ts);");
     $db->exec("CREATE INDEX IF NOT EXISTS idx_data_device_ts ON data(device_id, ts);");
     $db->exec("CREATE INDEX IF NOT EXISTS idx_nonces_device_nonce ON nonces(device_id, nonce);");
+
+    dedupe_data_rows($db);
+    try {
+        $db->exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_data_device_ts_unique ON data(device_id, ts);");
+    } catch (Throwable $e) {
+        // Old databases may contain legacy duplicates or partial migrations.
+        // Server startup should continue even if the unique index cannot be applied yet.
+    }
 }
 
 function is_registered(string $device_id): bool {
