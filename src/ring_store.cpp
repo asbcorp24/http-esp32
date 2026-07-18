@@ -154,6 +154,24 @@ size_t RingStoreCountApprox() {
   return diff > cap ? cap : diff;
 }
 
+void RingStoreDebugState(const char* tag) {
+  const uint32_t head = getU32("head", 0);
+  const uint32_t tail = getU32("tail", 0);
+  const uint32_t cap = capacityRecs();
+  const size_t count = RingStoreCountApprox();
+  Serial.printf(
+    "[RING] %s path=%s head=%u tail=%u count=%u cap=%u fileSize=%u recSize=%u\n",
+    tag ? tag : "-",
+    gPath.c_str(),
+    head,
+    tail,
+    (unsigned)count,
+    cap,
+    (unsigned)gFileSize,
+    (unsigned)REC_SIZE
+  );
+}
+
 bool RingStoreAppend(const SampleRec& r) {
   File f = LittleFS.open(gPath, "r+");
   if (!f) return false;

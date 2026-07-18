@@ -70,6 +70,7 @@ static String makeDeviceId() {
 
 static bool readHttpResponse(int& outStatus, String& outBody) {
   unsigned long startedAt = millis();
+  SerialMon.printf("[HTTP] wait headers connected=%d available=%d\n", gsmClient.connected() ? 1 : 0, gsmClient.available());
   while (!gsmClient.available()) {
     if (millis() - startedAt > 15000) {
       outStatus = -3;
@@ -88,6 +89,7 @@ static bool readHttpResponse(int& outStatus, String& outBody) {
   if (statusLine.startsWith("HTTP/1.1") || statusLine.startsWith("HTTP/1.0")) {
     outStatus = statusLine.substring(9, 12).toInt();
   }
+  SerialMon.printf("[HTTP] headers start connected=%d available=%d\n", gsmClient.connected() ? 1 : 0, gsmClient.available());
 
   while (gsmClient.connected() || gsmClient.available()) {
     String headerLine = gsmClient.readStringUntil('\n');
@@ -117,7 +119,7 @@ static bool readHttpResponse(int& outStatus, String& outBody) {
     delay(20);
   }
 
-  SerialMon.printf("[HTTP] parsed status=%d body=%s\n", outStatus, outBody.c_str());
+  SerialMon.printf("[HTTP] parsed status=%d bodyLen=%u body=%s\n", outStatus, (unsigned)outBody.length(), outBody.c_str());
 
   return outStatus == 200;
 }
@@ -223,6 +225,7 @@ static void doSyncTime(uint32_t& seq) {
     SerialMon.printf("[TIME] sync failed status=%d body=%s\n", status, body.c_str());
     return;
   }
+  SerialMon.printf("[TIME] sync raw body=%s\n", body.c_str());
 
   DynamicJsonDocument doc(256);
   if (!parseJson(body, doc)) return;
@@ -297,22 +300,39 @@ static String buildRecordsJson(const std::vector<SampleRec>& batch) {
 }
 
 static void sendData(uint32_t& seq) {
+  RingStoreDebugState("before-read");
   std::vector<SampleRec> batch;
   const size_t n = RingStoreReadBatch(batch, 2);
-  if (n == 0) return;
+  if (n == 0) {
+    SerialMon.println("[SEND] no records in queue");
+    return;
+  }
+
+  SerialMon.printf("[SEND] batch size=%u seq=%u firstTs=%u lastTs=%u\n",
+    (unsigned)n,
+    seq,
+    batch.front().ts,
+    batch.back().ts);
 
   int status = 0;
   String body;
   const String plain = buildRecordsJson(batch);
   const bool ok = postEncrypted("/data", plain, status, body);
+  SerialMon.printf("[SEND] result ok=%d status=%d body=%s\n", ok ? 1 : 0, status, body.c_str());
   if (ok && body.indexOf("\"OK\"") >= 0) {
+    RingStoreDebugState("before-drop");
     RingStoreDrop(batch.size());
+    RingStoreDebugState("after-drop");
     seq++;
     saveSeq(seq);
+    SerialMon.printf("[SEND] drop success newSeq=%u\n", seq);
     return;
   }
 
+  SerialMon.println("[SEND] batch NOT dropped");
+
   if (body.indexOf("notreg") >= 0 && doRegister(seq)) {
+    SerialMon.println("[SEND] retry after registration");
     sendData(seq);
   }
 }
@@ -328,6 +348,14 @@ static void gsmTask(void* pv) {
 
   while (true) {
     loadUplinkCfg();
+    SerialMon.printf("[GSM] loop host=%s port=%u apn=%s sampleInt=%u seq=%u validTime=%d gprs=%d\n",
+      cfgHost.c_str(),
+      cfgPort,
+      cfgApn.c_str(),
+      sampleIntervalSec,
+      seq,
+      SensorsHasValidTime() ? 1 : 0,
+      modem.isGprsConnected() ? 1 : 0);
 
     if (!modem.isGprsConnected()) {
       SerialMon.println("GPRS disconnected, reconnect...");

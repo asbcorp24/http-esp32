@@ -53,11 +53,14 @@ static SemaphoreHandle_t dataMtx;
 
 static void logRelayDecision(const char* reason) {
   Serial.printf(
-    "[RELAY] %s cmd=%d actual=%d pin=%d\n",
+    "[RELAY] %s cmd=%d actual=%d pin=%d storedCmd=%d sampleInt=%u phaseLimit=%u\n",
     reason,
     relayCommandOn ? 1 : 0,
     relayState ? 1 : 0,
-    digitalRead(PUMP_RELAY_PIN)
+    digitalRead(PUMP_RELAY_PIN),
+    relayCommandOn ? 1 : 0,
+    sampleIntervalSec,
+    phaseImbalanceLimitPct
   );
 }
 
@@ -90,18 +93,20 @@ static void loadConfig() {
 static uint32_t nowTs() {
   if (rtcOk && rtcTimeValid) {
     const uint32_t ts = rtc.now().unixtime();
-    Serial.printf("[TIME] RTC ts=%u\n", ts);
+    Serial.printf("[TIME] RTC ts=%u rtcOk=1 rtcValid=1 syncedBase=%d\n", ts, hasSyncedBaseTime ? 1 : 0);
     return ts;
   }
 
   if (hasSyncedBaseTime) {
     const uint32_t ts = syncedBaseTs + ((millis() - syncedBaseMillis) / 1000UL);
-    Serial.printf("[TIME] FALLBACK synced-base ts=%u rtcOk=0\n", ts);
+    Serial.printf("[TIME] FALLBACK synced-base ts=%u rtcOk=%d rtcValid=%d baseTs=%u baseMillis=%u\n",
+      ts, rtcOk ? 1 : 0, rtcTimeValid ? 1 : 0, syncedBaseTs, syncedBaseMillis);
     return ts;
   }
 
   const uint32_t ts = millis() / 1000UL;
-  Serial.printf("[TIME] FALLBACK uptime-only ts=%u rtcOk=0 synced=0\n", ts);
+  Serial.printf("[TIME] FALLBACK uptime-only ts=%u rtcOk=%d rtcValid=%d synced=0 millis=%u\n",
+    ts, rtcOk ? 1 : 0, rtcTimeValid ? 1 : 0, millis());
   return ts;
 }
 
@@ -175,6 +180,7 @@ void SensorsSetRemoteRelayDesired(bool on) {
   relayCommandOn = on;
   saveRelayCommand();
   updateRelayOutput();
+  Serial.printf("[RELAY] REMOTE CMD applied=%d pinNow=%d\n", relayState ? 1 : 0, digitalRead(PUMP_RELAY_PIN));
 }
 
 bool SensorsGetRemoteRelayDesired() {
@@ -186,7 +192,7 @@ void SensorsSetSyncedTime(uint32_t ts) {
   syncedBaseMillis = millis();
   hasSyncedBaseTime = true;
   rtcTimeValid = true;
-  Serial.printf("[TIME] synced base stored ts=%u millis=%u\n", syncedBaseTs, syncedBaseMillis);
+  Serial.printf("[TIME] synced base stored ts=%u millis=%u rtcOk=%d\n", syncedBaseTs, syncedBaseMillis, rtcOk ? 1 : 0);
 }
 
 bool SensorsHasValidTime() {
@@ -222,6 +228,7 @@ void SensorsInit() {
   ds18b20.begin();
   hasTemp1 = ds18b20.getAddress(tempAddr1, 0);
   hasTemp2 = ds18b20.getAddress(tempAddr2, 1);
+  Serial.printf("[TEMP] sensors found t1=%d t2=%d bus=%u\n", hasTemp1 ? 1 : 0, hasTemp2 ? 1 : 0, TEMP_BUS_PIN);
 
   dataMtx = xSemaphoreCreateMutex();
 }
@@ -231,6 +238,8 @@ static void sensorsTask(void* pv) {
 
   while (true) {
     loadConfig();
+    Serial.printf("[SENS] loop sampleInt=%u voltage=%.1f phaseLimit=%u relayCmd=%d relayPin=%d\n",
+      sampleIntervalSec, supplyVoltage, phaseImbalanceLimitPct, relayCommandOn ? 1 : 0, digitalRead(PUMP_RELAY_PIN));
 
     const float current1 = sanitizeCurrent(phase1Monitor.calcIrms(1480));
     const float current2 = sanitizeCurrent(phase2Monitor.calcIrms(1480));

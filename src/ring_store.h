@@ -26,3 +26,4 @@ bool RingStoreAppend(const SampleRec& r);
 size_t RingStoreReadBatch(std::vector<SampleRec>& out, size_t maxItems);
 bool RingStoreDrop(size_t count);
 size_t RingStoreCountApprox();
+void RingStoreDebugState(const char* tag);
