@@ -123,12 +123,23 @@ try {
     $payload = decrypt_payload_or_400((string)$rawBody);
     $device_id = (string)($payload["device_id"] ?? "");
     $nonce = (string)($payload["nonce"] ?? "");
+    $fw = trim((string)($payload["fw"] ?? ""));
+    $boot_id = trim((string)($payload["boot_id"] ?? ""));
+    $seq = (int)($payload["seq"] ?? 0);
 
     if ($path === "/register") {
         if ($device_id === "") {
             json_ok(["status" => "badreq"], 400);
         }
 
+        if (DEBUG_LOG) {
+            log_line("REGISTER", [
+                "device_id" => $device_id,
+                "fw" => $fw,
+                "boot_id" => $boot_id,
+                "seq" => $seq,
+            ]);
+        }
         register_device($device_id);
         json_ok(["status" => "OK"]);
     }
@@ -146,6 +157,14 @@ try {
     }
 
     if ($path === "/control") {
+        if (DEBUG_LOG) {
+            log_line("CONTROL_REQUEST", [
+                "device_id" => $device_id,
+                "fw" => $fw,
+                "boot_id" => $boot_id,
+                "seq" => $seq,
+            ]);
+        }
         json_ok([
             "status" => "OK",
             "device_id" => $device_id,
@@ -157,6 +176,16 @@ try {
         $records = $payload["records"] ?? null;
         if (!is_array($records)) {
             json_ok(["status" => "badreq"], 400);
+        }
+
+        if (DEBUG_LOG) {
+            log_line("DATA_REQUEST", [
+                "device_id" => $device_id,
+                "fw" => $fw,
+                "boot_id" => $boot_id,
+                "seq" => $seq,
+                "records_n" => count($records),
+            ]);
         }
 
         $db = pdo();
@@ -199,6 +228,9 @@ try {
             if (DEBUG_LOG) {
                 log_line("DATA_RECORD", [
                     "device_id" => $device_id,
+                    "fw" => $fw,
+                    "boot_id" => $boot_id,
+                    "seq" => $seq,
                     "ts" => $row[1],
                     "current1_mA" => $row[2],
                     "current2_mA" => $row[3],

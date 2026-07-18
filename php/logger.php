@@ -2,9 +2,18 @@
 // logger.php
 declare(strict_types=1);
 
+const LOG_MAX_BYTES = 10485760;
+
 function log_path(): string {
-    // Папка должна быть доступна на запись (проверь права)
     return __DIR__ . "/server.log";
+}
+
+function reset_log_if_too_large(string $path): void {
+    clearstatcache(true, $path);
+    $size = @filesize($path);
+    if ($size !== false && $size >= LOG_MAX_BYTES) {
+        @file_put_contents($path, "");
+    }
 }
 
 function log_line(string $msg, array $ctx = []): void {
@@ -14,15 +23,15 @@ function log_line(string $msg, array $ctx = []): void {
     $method = $_SERVER["REQUEST_METHOD"] ?? "-";
 
     if (!empty($ctx)) {
-        // Безопасный JSON, чтобы не сломать лог
         $ctxJson = json_encode($ctx, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
         $line = "[$ts] [$ip] [$method $uri] $msg | $ctxJson\n";
     } else {
         $line = "[$ts] [$ip] [$method $uri] $msg\n";
     }
 
-    // FILE_APPEND + LOCK_EX чтобы не перемешивалось
-    @file_put_contents(log_path(), $line, FILE_APPEND | LOCK_EX);
+    $path = log_path();
+    reset_log_if_too_large($path);
+    @file_put_contents($path, $line, FILE_APPEND | LOCK_EX);
 }
 
 function log_exception(Throwable $e, string $tag = "EX"): void {
@@ -33,7 +42,6 @@ function log_exception(Throwable $e, string $tag = "EX"): void {
     ]);
 }
 
-// Выведем аккуратно hex для первых байт бинарника
 function bin_preview(string $bin, int $max = 32): string {
     $n = min(strlen($bin), $max);
     return bin2hex(substr($bin, 0, $n)) . (strlen($bin) > $max ? "..." : "");

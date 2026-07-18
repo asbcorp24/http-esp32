@@ -29,22 +29,35 @@ static uint8_t clampPhasePct(uint8_t v) {
   return v;
 }
 
+static String sanitizeCfgString(String value) {
+  value.replace("\r", "");
+  value.replace("\n", "");
+  value.replace("\t", " ");
+  value.trim();
+  return value;
+}
+
 static void loadConfig() {
-  cfg.apn = prefGetString("apn", "internet.tele2.ru");
-  cfg.serverHost = prefGetString("serverHost", "specdpo.ru");
+  cfg.apn = sanitizeCfgString(prefGetString("apn", "internet.tele2.ru"));
+  cfg.serverHost = sanitizeCfgString(prefGetString("serverHost", "specdpo.ru"));
   cfg.serverPort = prefGetUShort("serverPort", 80);
   cfg.location = prefGetString("location", "");
   if (cfg.location.length() > 500) cfg.location = cfg.location.substring(0, 500);
 
-  cfg.cryptoPass = prefGetString("cryptoPass", "12345678");
-  cfg.adminLogin = prefGetString("adminLogin", "admin");
-  cfg.adminPass = prefGetString("adminPass", "admin");
+  cfg.cryptoPass = sanitizeCfgString(prefGetString("cryptoPass", "12345678"));
+  cfg.adminLogin = sanitizeCfgString(prefGetString("adminLogin", "admin"));
+  cfg.adminPass = sanitizeCfgString(prefGetString("adminPass", "admin"));
   cfg.voltage = prefs.getFloat("voltage", 220.0f);
   cfg.sampleIntervalSec = clampInterval(prefs.getUShort("sampleInt", 30));
   cfg.phaseImbalancePct = clampPhasePct((uint8_t)prefs.getUChar("phasePct", 10));
 }
 
 static void saveConfig() {
+  cfg.apn = sanitizeCfgString(cfg.apn);
+  cfg.serverHost = sanitizeCfgString(cfg.serverHost);
+  cfg.cryptoPass = sanitizeCfgString(cfg.cryptoPass);
+  cfg.adminLogin = sanitizeCfgString(cfg.adminLogin);
+  cfg.adminPass = sanitizeCfgString(cfg.adminPass);
   prefs.putString("apn", cfg.apn);
   prefs.putString("serverHost", cfg.serverHost);
   prefs.putUShort("serverPort", cfg.serverPort);
@@ -165,7 +178,11 @@ static void webSetupRoutes() {
     if (web.hasArg("sampleIntervalSec")) cfg.sampleIntervalSec = (uint16_t)web.arg("sampleIntervalSec").toInt();
     if (web.hasArg("phaseImbalancePct")) cfg.phaseImbalancePct = (uint8_t)web.arg("phaseImbalancePct").toInt();
 
-    cfg.apn.trim();
+    cfg.apn = sanitizeCfgString(cfg.apn);
+    cfg.serverHost = sanitizeCfgString(cfg.serverHost);
+    cfg.cryptoPass = sanitizeCfgString(cfg.cryptoPass);
+    cfg.adminLogin = sanitizeCfgString(cfg.adminLogin);
+    cfg.adminPass = sanitizeCfgString(cfg.adminPass);
     if (!cfg.apn.length()) cfg.apn = "internet.tele2.ru";
     if (cfg.location.length() > 500) cfg.location = cfg.location.substring(0, 500);
     if (cfg.cryptoPass.length() < 8) cfg.cryptoPass = "12345678";

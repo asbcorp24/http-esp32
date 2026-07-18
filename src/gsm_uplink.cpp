@@ -31,6 +31,9 @@ static uint16_t cfgPort;
 static String cryptoPass;
 static uint16_t sampleIntervalSec;
 static String deviceId;
+static String bootId;
+
+static const char* FW_VERSION = "2026-07-18-debug2";
 
 static uint16_t clampInterval(uint16_t v) {
   if (v < 15) return 15;
@@ -38,14 +41,26 @@ static uint16_t clampInterval(uint16_t v) {
   return v;
 }
 
+static String sanitizeCfgString(String value) {
+  value.replace("\r", "");
+  value.replace("\n", "");
+  value.replace("\t", " ");
+  value.trim();
+  return value;
+}
+
 static void loadUplinkCfg() {
   prefs.begin("cfg", true);
-  cfgApn = prefs.getString("apn", "internet.tele2.ru");
-  cfgHost = prefs.getString("serverHost", "specdpo.ru");
+  cfgApn = sanitizeCfgString(prefs.getString("apn", "internet.tele2.ru"));
+  cfgHost = sanitizeCfgString(prefs.getString("serverHost", "specdpo.ru"));
   cfgPort = prefs.getUShort("serverPort", 80);
-  cryptoPass = prefs.getString("cryptoPass", "12345678");
+  cryptoPass = sanitizeCfgString(prefs.getString("cryptoPass", "12345678"));
   sampleIntervalSec = clampInterval(prefs.getUShort("sampleInt", 30));
   prefs.end();
+
+  if (!cfgApn.length()) cfgApn = "internet.tele2.ru";
+  if (!cfgHost.length()) cfgHost = "specdpo.ru";
+  if (cryptoPass.length() < 8) cryptoPass = "12345678";
 }
 
 static uint32_t loadSeq() {
@@ -65,6 +80,12 @@ static String makeDeviceId() {
   const uint64_t mac = ESP.getEfuseMac();
   char buf[24];
   sprintf(buf, "esp32-%04X%08X", (uint16_t)(mac >> 32), (uint32_t)mac);
+  return String(buf);
+}
+
+static String makeBootId() {
+  char buf[24];
+  sprintf(buf, "%08lX-%08lX", (unsigned long)millis(), (unsigned long)esp_random());
   return String(buf);
 }
 
@@ -195,6 +216,8 @@ static String makeNonce() {
 static bool doRegister(uint32_t& seq) {
   String plain = "{";
   plain += "\"device_id\":\"" + deviceId + "\",";
+  plain += "\"fw\":\"" + String(FW_VERSION) + "\",";
+  plain += "\"boot_id\":\"" + bootId + "\",";
   plain += "\"nonce\":\"" + makeNonce() + "\",";
   plain += "\"seq\":" + String(seq);
   plain += "}";
@@ -215,6 +238,8 @@ static bool doRegister(uint32_t& seq) {
 static void doSyncTime(uint32_t& seq) {
   String plain = "{";
   plain += "\"device_id\":\"" + deviceId + "\",";
+  plain += "\"fw\":\"" + String(FW_VERSION) + "\",";
+  plain += "\"boot_id\":\"" + bootId + "\",";
   plain += "\"nonce\":\"" + makeNonce() + "\",";
   plain += "\"seq\":" + String(seq);
   plain += "}";
@@ -253,6 +278,8 @@ static void applyRelayCommandFromBody(const String& body) {
 static void pollControl(uint32_t& seq) {
   String plain = "{";
   plain += "\"device_id\":\"" + deviceId + "\",";
+  plain += "\"fw\":\"" + String(FW_VERSION) + "\",";
+  plain += "\"boot_id\":\"" + bootId + "\",";
   plain += "\"nonce\":\"" + makeNonce() + "\",";
   plain += "\"seq\":" + String(seq);
   plain += "}";
@@ -273,6 +300,8 @@ static void pollControl(uint32_t& seq) {
 static String buildRecordsJson(const std::vector<SampleRec>& batch) {
   String plain = "{";
   plain += "\"device_id\":\"" + deviceId + "\",";
+  plain += "\"fw\":\"" + String(FW_VERSION) + "\",";
+  plain += "\"boot_id\":\"" + bootId + "\",";
   plain += "\"nonce\":\"" + makeNonce() + "\",";
   plain += "\"records\":[";
 
@@ -345,10 +374,13 @@ static void gsmTask(void* pv) {
   uint32_t seq = loadSeq();
   const uint32_t timeSyncIntervalMs = 1000UL * 60UL * 60UL;
   bool firstTimeSyncPending = true;
+  SerialMon.printf("[BOOT] fw=%s boot_id=%s device=%s\n", FW_VERSION, bootId.c_str(), deviceId.c_str());
 
   while (true) {
     loadUplinkCfg();
-    SerialMon.printf("[GSM] loop host=%s port=%u apn=%s sampleInt=%u seq=%u validTime=%d gprs=%d\n",
+    SerialMon.printf("[GSM] loop fw=%s boot_id=%s host=%s port=%u apn=%s sampleInt=%u seq=%u validTime=%d gprs=%d\n",
+      FW_VERSION,
+      bootId.c_str(),
       cfgHost.c_str(),
       cfgPort,
       cfgApn.c_str(),
@@ -387,6 +419,7 @@ static void gsmTask(void* pv) {
 void GsmInit() {
   loadUplinkCfg();
   deviceId = makeDeviceId();
+  bootId = makeBootId();
 
   SerialAT.begin(9600, SERIAL_8N1, 16, 17);
   delay(300);
