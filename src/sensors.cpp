@@ -40,10 +40,10 @@ static float supplyVoltage = 220.0f;
 static uint16_t sampleIntervalSec = 30;
 static uint8_t phaseImbalanceLimitPct = 10;
 static bool relayCommandOn = false;
-static bool phaseTripLatched = false;
 static bool relayState = false;
 static bool heaterState = false;
 static bool hasSyncedBaseTime = false;
+static bool rtcTimeValid = false;
 static uint32_t syncedBaseTs = 0;
 static uint32_t syncedBaseMillis = 0;
 
@@ -52,13 +52,10 @@ static bool hasData = false;
 static SemaphoreHandle_t dataMtx;
 
 static void logRelayDecision(const char* reason) {
-  const bool shouldOn = relayCommandOn;
   Serial.printf(
-    "[RELAY] %s cmd=%d trip=%d should=%d actual=%d pin=%d\n",
+    "[RELAY] %s cmd=%d actual=%d pin=%d\n",
     reason,
     relayCommandOn ? 1 : 0,
-    phaseTripLatched ? 1 : 0,
-    shouldOn ? 1 : 0,
     relayState ? 1 : 0,
     digitalRead(PUMP_RELAY_PIN)
   );
@@ -91,7 +88,7 @@ static void loadConfig() {
 }
 
 static uint32_t nowTs() {
-  if (rtcOk) {
+  if (rtcOk && rtcTimeValid) {
     const uint32_t ts = rtc.now().unixtime();
     Serial.printf("[TIME] RTC ts=%u\n", ts);
     return ts;
@@ -170,21 +167,12 @@ static void updateLatest(const SensorData& snapshot) {
 
 void SensorsSetRemoteRelayDesired(bool on) {
   Serial.printf(
-    "[RELAY] REMOTE CMD received=%d prev_cmd=%d prev_trip=%d prev_actual=%d\n",
+    "[RELAY] REMOTE CMD received=%d prev_cmd=%d prev_actual=%d\n",
     on ? 1 : 0,
     relayCommandOn ? 1 : 0,
-    phaseTripLatched ? 1 : 0,
     relayState ? 1 : 0
   );
   relayCommandOn = on;
-  if (on) {
-    phaseTripLatched = false;
-    Serial.println("[RELAY] phase trip latch cleared by ON command");
-  }
-  if (!on) {
-    phaseTripLatched = false;
-    Serial.println("[RELAY] phase trip latch cleared by OFF command");
-  }
   saveRelayCommand();
   updateRelayOutput();
 }
@@ -197,7 +185,12 @@ void SensorsSetSyncedTime(uint32_t ts) {
   syncedBaseTs = ts;
   syncedBaseMillis = millis();
   hasSyncedBaseTime = true;
+  rtcTimeValid = true;
   Serial.printf("[TIME] synced base stored ts=%u millis=%u\n", syncedBaseTs, syncedBaseMillis);
+}
+
+bool SensorsHasValidTime() {
+  return (rtcOk && rtcTimeValid) || hasSyncedBaseTime;
 }
 
 void SensorsInit() {
@@ -211,7 +204,15 @@ void SensorsInit() {
 
   Wire.begin();
   rtcOk = rtc.begin();
-  Serial.printf("[TIME] RTC begin %s\n", rtcOk ? "OK" : "FAIL");
+  rtcTimeValid = false;
+  if (rtcOk) {
+    const uint32_t rtcTs = rtc.now().unixtime();
+    // Trust RTC only if it already contains a plausible Unix time.
+    rtcTimeValid = rtcTs >= 1704067200UL; // 2024-01-01 00:00:00 UTC
+    Serial.printf("[TIME] RTC begin OK ts=%u valid=%d\n", rtcTs, rtcTimeValid ? 1 : 0);
+  } else {
+    Serial.println("[TIME] RTC begin FAIL");
+  }
 
   analogReadResolution(12);
   phase1Monitor.current(CURRENT1_PIN, CURRENT_CALIBRATION);
@@ -244,18 +245,16 @@ static void sensorsTask(void* pv) {
     heaterControl(controlTempC > -100.0f ? controlTempC : 25.0f);
 
     const float phaseImbalancePct = computePhaseImbalancePct(current1, current2, current3);
-    if (phaseImbalancePct > phaseImbalanceLimitPct) {
-      phaseTripLatched = true;
+    const bool phaseTripActive = phaseImbalancePct > phaseImbalanceLimitPct;
+    if (phaseTripActive) {
       Serial.printf(
-        "[RELAY] PHASE TRIP detected but ignored for relay control imbalance=%.2f limit=%u currents=[%.3f,%.3f,%.3f]\n",
+        "[RELAY] PHASE TRIP telemetry imbalance=%.2f limit=%u currents=[%.3f,%.3f,%.3f]\n",
         phaseImbalancePct,
         phaseImbalanceLimitPct,
         current1,
         current2,
         current3
       );
-    } else {
-      phaseTripLatched = false;
     }
     updateRelayOutput();
 
@@ -270,7 +269,7 @@ static void sensorsTask(void* pv) {
     snapshot.heaterState = heaterState;
     snapshot.relayState = relayState;
     snapshot.relayCommandOn = relayCommandOn;
-    snapshot.phaseTrip = phaseTripLatched;
+    snapshot.phaseTrip = phaseTripActive;
     snapshot.ts = nowTs();
     updateLatest(snapshot);
 

@@ -324,6 +324,7 @@ static void gsmTask(void* pv) {
   uint32_t lastSend = 0;
   uint32_t seq = loadSeq();
   const uint32_t timeSyncIntervalMs = 1000UL * 60UL * 60UL;
+  bool firstTimeSyncPending = true;
 
   while (true) {
     loadUplinkCfg();
@@ -336,7 +337,11 @@ static void gsmTask(void* pv) {
     }
 
     const uint32_t nowMs = millis();
-    if (nowMs - lastTimeSync >= timeSyncIntervalMs) {
+    if (firstTimeSyncPending || !SensorsHasValidTime()) {
+      doSyncTime(seq);
+      lastTimeSync = nowMs;
+      firstTimeSyncPending = false;
+    } else if (nowMs - lastTimeSync >= timeSyncIntervalMs) {
       doSyncTime(seq);
       lastTimeSync = nowMs;
     }
