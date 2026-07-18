@@ -46,6 +46,7 @@ static bool hasSyncedBaseTime = false;
 static bool rtcTimeValid = false;
 static uint32_t syncedBaseTs = 0;
 static uint32_t syncedBaseMillis = 0;
+static const uint32_t MIN_VALID_TS = 1767225600UL; // 2026-01-01 00:00:00 UTC
 
 static SensorData latest{};
 static bool hasData = false;
@@ -93,8 +94,13 @@ static void loadConfig() {
 static uint32_t nowTs() {
   if (rtcOk && rtcTimeValid) {
     const uint32_t ts = rtc.now().unixtime();
-    Serial.printf("[TIME] RTC ts=%u rtcOk=1 rtcValid=1 syncedBase=%d\n", ts, hasSyncedBaseTime ? 1 : 0);
-    return ts;
+    if (ts >= MIN_VALID_TS) {
+      Serial.printf("[TIME] RTC ts=%u rtcOk=1 rtcValid=1 syncedBase=%d\n", ts, hasSyncedBaseTime ? 1 : 0);
+      return ts;
+    }
+
+    rtcTimeValid = false;
+    Serial.printf("[TIME] RTC rejected ts=%u rtcOk=1 rtcValid=0 syncedBase=%d\n", ts, hasSyncedBaseTime ? 1 : 0);
   }
 
   if (hasSyncedBaseTime) {
@@ -111,11 +117,11 @@ static uint32_t nowTs() {
 }
 
 static void setRelayOutput(bool on) {
-  relayState = on;
   digitalWrite(PUMP_RELAY_PIN, on ? HIGH : LOW);
+  relayState = digitalRead(PUMP_RELAY_PIN) == HIGH;
   Serial.printf(
     "[RELAY] OUTPUT set on=%d gpio=%d level=%d\n",
-    on ? 1 : 0,
+    relayState ? 1 : 0,
     PUMP_RELAY_PIN,
     digitalRead(PUMP_RELAY_PIN)
   );
@@ -191,8 +197,15 @@ void SensorsSetSyncedTime(uint32_t ts) {
   syncedBaseTs = ts;
   syncedBaseMillis = millis();
   hasSyncedBaseTime = true;
-  rtcTimeValid = true;
-  Serial.printf("[TIME] synced base stored ts=%u millis=%u rtcOk=%d\n", syncedBaseTs, syncedBaseMillis, rtcOk ? 1 : 0);
+  if (rtcOk) {
+    const uint32_t rtcTs = rtc.now().unixtime();
+    rtcTimeValid = rtcTs >= MIN_VALID_TS;
+    Serial.printf("[TIME] synced base stored ts=%u millis=%u rtcTs=%u rtcValid=%d\n",
+      syncedBaseTs, syncedBaseMillis, rtcTs, rtcTimeValid ? 1 : 0);
+  } else {
+    rtcTimeValid = false;
+    Serial.printf("[TIME] synced base stored ts=%u millis=%u rtcOk=0\n", syncedBaseTs, syncedBaseMillis);
+  }
 }
 
 bool SensorsHasValidTime() {
@@ -214,7 +227,7 @@ void SensorsInit() {
   if (rtcOk) {
     const uint32_t rtcTs = rtc.now().unixtime();
     // Trust RTC only if it already contains a plausible Unix time.
-    rtcTimeValid = rtcTs >= 1704067200UL; // 2024-01-01 00:00:00 UTC
+    rtcTimeValid = rtcTs >= MIN_VALID_TS;
     Serial.printf("[TIME] RTC begin OK ts=%u valid=%d\n", rtcTs, rtcTimeValid ? 1 : 0);
   } else {
     Serial.println("[TIME] RTC begin FAIL");
@@ -280,6 +293,7 @@ static void sensorsTask(void* pv) {
     snapshot.relayCommandOn = relayCommandOn;
     snapshot.phaseTrip = phaseTripActive;
     snapshot.ts = nowTs();
+    snapshot.relayState = SensorsIsRelayOutputOn();
     updateLatest(snapshot);
 
     SampleRec rec{};
@@ -329,4 +343,8 @@ bool SensorsGetLatest(SensorData& out) {
   out = latest;
   xSemaphoreGive(dataMtx);
   return true;
+}
+
+bool SensorsIsRelayOutputOn() {
+  return digitalRead(PUMP_RELAY_PIN) == HIGH;
 }

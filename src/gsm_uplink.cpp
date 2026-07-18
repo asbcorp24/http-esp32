@@ -303,6 +303,7 @@ static String buildRecordsJson(const std::vector<SampleRec>& batch) {
   plain += "\"fw\":\"" + String(FW_VERSION) + "\",";
   plain += "\"boot_id\":\"" + bootId + "\",";
   plain += "\"nonce\":\"" + makeNonce() + "\",";
+  plain += "\"seq\":" + String(loadSeq()) + ",";
   plain += "\"records\":[";
 
   for (size_t i = 0; i < batch.size(); i++) {
