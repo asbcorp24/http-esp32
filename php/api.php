@@ -141,13 +141,14 @@ try {
             $params = [];
             $where = '';
             if ($deviceId !== '') {
-                $where = "WHERE device_id = ?";
+                $where = "WHERE data.device_id = ?";
                 $params[] = $deviceId;
             }
 
             $sql = "
                 SELECT
-                    device_id,
+                    data.device_id,
+                    devices.location,
                     datetime(ts, 'unixepoch', 'localtime') AS time_str,
                     ts,
                     current1_mA,
@@ -162,6 +163,7 @@ try {
                     phase_trip,
                     relay_cmd_on
                 FROM data
+                LEFT JOIN devices ON devices.id = data.device_id
                 {$where}
                 ORDER BY ts DESC
                 LIMIT {$limit}

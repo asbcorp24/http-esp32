@@ -46,7 +46,8 @@ function init_db(): void {
     $db->exec("
         CREATE TABLE IF NOT EXISTS devices (
             id TEXT PRIMARY KEY,
-            created INTEGER
+            created INTEGER,
+            location TEXT DEFAULT ''
         );
     ");
 
@@ -95,6 +96,7 @@ function init_db(): void {
     ensure_column($db, "data", "heater_on", "INTEGER");
     ensure_column($db, "data", "phase_trip", "INTEGER");
     ensure_column($db, "data", "relay_cmd_on", "INTEGER");
+    ensure_column($db, "devices", "location", "TEXT DEFAULT ''");
 
     $db->exec("CREATE INDEX IF NOT EXISTS idx_data_ts ON data(ts);");
     $db->exec("CREATE INDEX IF NOT EXISTS idx_data_device_ts ON data(device_id, ts);");
@@ -115,14 +117,32 @@ function is_registered(string $device_id): bool {
     return (bool)$st->fetchColumn();
 }
 
-function register_device(string $device_id): void {
+function register_device(string $device_id, string $location = ''): void {
     $db = pdo();
 
     $st = $db->prepare("INSERT OR IGNORE INTO devices(id, created) VALUES (?, ?)");
     $st->execute([$device_id, time()]);
 
+    if ($location !== '') {
+        update_device_location($device_id, $location);
+    }
+
     $st = $db->prepare("INSERT OR IGNORE INTO device_control(device_id, relay_on, updated) VALUES (?, 0, ?)");
     $st->execute([$device_id, time()]);
+}
+
+function update_device_location(string $device_id, string $location): void {
+    $location = trim($location);
+    if ($location === '') {
+        return;
+    }
+
+    $st = pdo()->prepare("
+        UPDATE devices
+        SET location = ?
+        WHERE id = ?
+    ");
+    $st->execute([$location, $device_id]);
 }
 
 function check_nonce(string $device_id, string $nonce): bool {

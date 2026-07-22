@@ -27,6 +27,7 @@ static TinyGsmClient gsmClient(modem);
 static Preferences prefs;
 static String cfgApn;
 static String cfgHost;
+static String cfgLocation;
 static uint16_t cfgPort;
 static String cryptoPass;
 static uint16_t sampleIntervalSec;
@@ -53,6 +54,7 @@ static void loadUplinkCfg() {
   prefs.begin("cfg", true);
   cfgApn = sanitizeCfgString(prefs.getString("apn", "internet.tele2.ru"));
   cfgHost = sanitizeCfgString(prefs.getString("serverHost", "specdpo.ru"));
+  cfgLocation = sanitizeCfgString(prefs.getString("location", ""));
   cfgPort = prefs.getUShort("serverPort", 80);
   cryptoPass = sanitizeCfgString(prefs.getString("cryptoPass", "12345678"));
   sampleIntervalSec = clampInterval(prefs.getUShort("sampleInt", 30));
@@ -218,6 +220,7 @@ static bool doRegister(uint32_t& seq) {
   plain += "\"device_id\":\"" + deviceId + "\",";
   plain += "\"fw\":\"" + String(FW_VERSION) + "\",";
   plain += "\"boot_id\":\"" + bootId + "\",";
+  plain += "\"location\":\"" + cfgLocation + "\",";
   plain += "\"nonce\":\"" + makeNonce() + "\",";
   plain += "\"seq\":" + String(seq);
   plain += "}";
@@ -240,6 +243,7 @@ static void doSyncTime(uint32_t& seq) {
   plain += "\"device_id\":\"" + deviceId + "\",";
   plain += "\"fw\":\"" + String(FW_VERSION) + "\",";
   plain += "\"boot_id\":\"" + bootId + "\",";
+  plain += "\"location\":\"" + cfgLocation + "\",";
   plain += "\"nonce\":\"" + makeNonce() + "\",";
   plain += "\"seq\":" + String(seq);
   plain += "}";
@@ -280,6 +284,7 @@ static void pollControl(uint32_t& seq) {
   plain += "\"device_id\":\"" + deviceId + "\",";
   plain += "\"fw\":\"" + String(FW_VERSION) + "\",";
   plain += "\"boot_id\":\"" + bootId + "\",";
+  plain += "\"location\":\"" + cfgLocation + "\",";
   plain += "\"nonce\":\"" + makeNonce() + "\",";
   plain += "\"seq\":" + String(seq);
   plain += "}";
@@ -302,6 +307,7 @@ static String buildRecordsJson(const std::vector<SampleRec>& batch) {
   plain += "\"device_id\":\"" + deviceId + "\",";
   plain += "\"fw\":\"" + String(FW_VERSION) + "\",";
   plain += "\"boot_id\":\"" + bootId + "\",";
+  plain += "\"location\":\"" + cfgLocation + "\",";
   plain += "\"nonce\":\"" + makeNonce() + "\",";
   plain += "\"seq\":" + String(loadSeq()) + ",";
   plain += "\"records\":[";

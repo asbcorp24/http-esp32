@@ -253,10 +253,13 @@ $(document).ready(function() {
             const temp2 = formatScaled(row.temp2_cC, 100);
             const power = formatScaled(row.power_dW, 10);
             const phase = formatScaled(row.phase_imbalance_dPct, 10);
+            const deviceLabel = row.location && row.location.trim()
+                ? row.location
+                : `${row.device_id.substring(0, 12)}...`;
 
             tbody.append(`
                 <tr>
-                    <td><span class="device-badge">${row.device_id.substring(0, 12)}...</span></td>
+                    <td><span class="device-badge">${deviceLabel}</span></td>
                     <td>${row.time_str}</td>
                     <td>${row.current1_mA}</td>
                     <td>${row.current2_mA}</td>

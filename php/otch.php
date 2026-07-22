@@ -5,7 +5,7 @@ require_once __DIR__ . '/db.php';
 
 init_db();
 $db = pdo();
-$devices = $db->query("SELECT id, created FROM devices ORDER BY created DESC")->fetchAll(PDO::FETCH_ASSOC);
+$devices = $db->query("SELECT id, created, location FROM devices ORDER BY created DESC")->fetchAll(PDO::FETCH_ASSOC);
 ?>
 <!DOCTYPE html>
 <html lang="ru">
@@ -57,8 +57,9 @@ $devices = $db->query("SELECT id, created FROM devices ORDER BY created DESC")->
                         <select class="form-select glass-select" id="deviceSelect">
                             <option value="">Все устройства</option>
                             <?php foreach ($devices as $device): ?>
+                                <?php $deviceLabel = trim((string)($device['location'] ?? '')) !== '' ? $device['location'] : (substr($device['id'], 0, 12) . '...'); ?>
                                 <option value="<?= htmlspecialchars($device['id']) ?>">
-                                    <?= htmlspecialchars(substr($device['id'], 0, 12)) ?>...
+                                    <?= htmlspecialchars($deviceLabel) ?>
                                     (<?= date('d.m.Y', (int)$device['created']) ?>)
                                 </option>
                             <?php endforeach; ?>
