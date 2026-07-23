@@ -17,9 +17,57 @@ $(document).ready(function() {
         phase_trip: { label: 'Авария перекоса', unit: '', factor: 1 }
     };
 
+    normalizeTableLayout();
     initCharts();
+    updateSelectedDeviceTitle();
     loadData();
     setupEventListeners();
+
+    function getSelectedDeviceMeta() {
+        const $selected = $('#deviceSelect option:selected');
+        const deviceId = ($('#deviceSelect').val() || '').toString();
+        const location = (($selected.data('location') || '').toString()).trim();
+        const shortId = deviceId ? `${deviceId.substring(0, 12)}...` : '';
+        const titleLabel = deviceId
+            ? (location ? `${location} (${deviceId})` : deviceId)
+            : 'Все устройства';
+        const cityLabel = location || '-';
+        const combinedLabel = location ? `${location} (${deviceId})` : deviceId;
+
+        return { deviceId, location, shortId, titleLabel, cityLabel, combinedLabel };
+    }
+
+    function updateSelectedDeviceTitle() {
+        $('#selectedDeviceTitle').text(getSelectedDeviceMeta().titleLabel);
+    }
+
+    function normalizeTableLayout() {
+        const $headRow = $('#dataTable thead tr');
+        if (!$headRow.length) {
+            return;
+        }
+
+        $headRow.html(`
+            <th>Город / объект</th>
+            <th>ID устройства</th>
+            <th>Время</th>
+            <th>L1 (mA)</th>
+            <th>L2 (mA)</th>
+            <th>L3 (mA)</th>
+            <th>Мощность (дВт)</th>
+            <th>T1 (°C)</th>
+            <th>T2 (°C)</th>
+            <th>Перекос</th>
+            <th>Реле</th>
+            <th>Обогрев</th>
+            <th>Авария</th>
+        `);
+
+        const $placeholder = $('#tableBody td[colspan]');
+        if ($placeholder.length) {
+            $placeholder.attr('colspan', 13);
+        }
+    }
 
     function initCharts() {
         const ctx = document.getElementById('mainChart').getContext('2d');
@@ -91,7 +139,10 @@ $(document).ready(function() {
     function setupEventListeners() {
         $('#applyFilters').click(loadData);
         $('#refreshData').click(loadData);
-        $('#deviceSelect').change(loadData);
+        $('#deviceSelect').change(function() {
+            updateSelectedDeviceTitle();
+            loadData();
+        });
         $('#periodSelect').change(function() {
             if ($(this).val() === 'custom') {
                 alert('Произвольный период пока не реализован');
@@ -231,7 +282,7 @@ $(document).ready(function() {
         $('#relayActualText').text(actualRelay);
         $('#heaterText').text(heater);
         $('#phaseTripText').text(phaseTrip);
-        $('#relayStatusText').text(`Команда: ${desiredRelay}, выход: ${actualRelay}`);
+        $('#relayStatusText').text(`${getSelectedDeviceMeta().titleLabel}. Команда: ${desiredRelay}, выход: ${actualRelay}`);
     }
 
     function updateLastUpdate(timestamp) {
@@ -244,7 +295,7 @@ $(document).ready(function() {
         tbody.empty();
 
         if (!data.length) {
-            tbody.append('<tr><td colspan="12" class="text-center">Нет данных</td></tr>');
+            tbody.append('<tr><td colspan="13" class="text-center">Нет данных</td></tr>');
             return;
         }
 
@@ -253,13 +304,15 @@ $(document).ready(function() {
             const temp2 = formatScaled(row.temp2_cC, 100);
             const power = formatScaled(row.power_dW, 10);
             const phase = formatScaled(row.phase_imbalance_dPct, 10);
-            const deviceLabel = row.location && row.location.trim()
-                ? row.location
-                : `${row.device_id.substring(0, 12)}...`;
+            const cityLabel = row.location && row.location.trim() ? row.location : '-';
+            const deviceFullLabel = row.location && row.location.trim()
+                ? `${row.location} (${row.device_id})`
+                : row.device_id;
 
             tbody.append(`
                 <tr>
-                    <td><span class="device-badge">${deviceLabel}</span></td>
+                    <td><span class="device-badge device-badge-location">${cityLabel}</span></td>
+                    <td><span class="device-badge device-badge-id">${deviceFullLabel}</span></td>
                     <td>${row.time_str}</td>
                     <td>${row.current1_mA}</td>
                     <td>${row.current2_mA}</td>

@@ -154,6 +154,30 @@ body {
     font-size: 0.9em;
 }
 
+.selected-device-title {
+    color: var(--accent-primary);
+    font-size: 1rem;
+    font-weight: 700;
+    line-height: 1.35;
+}
+
+.device-badge-location {
+    display: inline-block;
+    font-family: 'Inter', sans-serif;
+    font-size: 1rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    padding: 6px 10px;
+}
+
+.device-badge-id {
+    display: inline-block;
+    max-width: 280px;
+    white-space: normal;
+    word-break: break-word;
+    font-size: 0.82rem;
+}
+
 /* Loading Overlay */
 .loading-overlay {
     position: fixed;

@@ -58,12 +58,13 @@ $devices = $db->query("SELECT id, created, location FROM devices ORDER BY create
                             <option value="">Все устройства</option>
                             <?php foreach ($devices as $device): ?>
                                 <?php $deviceLabel = trim((string)($device['location'] ?? '')) !== '' ? $device['location'] : (substr($device['id'], 0, 12) . '...'); ?>
-                                <option value="<?= htmlspecialchars($device['id']) ?>">
+                                <option value="<?= htmlspecialchars($device['id']) ?>" data-location="<?= htmlspecialchars((string)($device['location'] ?? '')) ?>" data-device-label="<?= htmlspecialchars($deviceLabel) ?>">
                                     <?= htmlspecialchars($deviceLabel) ?>
                                     (<?= date('d.m.Y', (int)$device['created']) ?>)
                                 </option>
                             <?php endforeach; ?>
                         </select>
+                        <div class="selected-device-title mt-3" id="selectedDeviceTitle">Все устройства</div>
                     </div>
                 </div>
             </div>
@@ -294,6 +295,8 @@ $devices = $db->query("SELECT id, created, location FROM devices ORDER BY create
                                     <tr>
                                         <th>Устройство</th>
                                         <th>Время</th>
+                                        <th>Город / объект</th>
+                                        <th>ID устройства</th>
                                         <th>L1 (mA)</th>
                                         <th>L2 (mA)</th>
                                         <th>L3 (mA)</th>
